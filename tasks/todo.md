@@ -1,4 +1,36 @@
-# Task: SPY/IEF MA-rotation multi-agent research and pitch pipeline
+# Task 2: Multi-asset momentum (4 lookbacks), added to the pipeline
+
+Plan: `C:\Users\emitb\.claude\plans\piped-imagining-popcorn.md`. Decisions:
+- cash rule decided per sub-strategy (all 6 negative → 3 months in cash)
+- no trading costs for momentum (the asymmetry with MA is disclosed)
+- comparison over the common period from 2011
+- one combined deck
+
+- [x] 1. `config.py`, `data.py`: new tickers, momentum config, quality report ignores missing data before a ticker's inception
+- [x] 2. `momentum.py` plus `tests/test_momentum.py`. Found a bug: the initial-purchase cost was never charged.
+- [x] 3. `analytics.py`: comparison windows, using a shared `_window_metrics` helper so MA and momentum use identical definitions
+- [x] 4. Agents: tools for Data, Backtest, Analytics and Presentation, plus the Team prompt
+- [x] 5. PDF/charts: comparison table, momentum detail page, 4 charts, disclosures. Code-enforced pros/cons, verdict and balance checks.
+- [x] 6. Evals: 3 new scorers, red-team cases. The new scorers fail on the pre-momentum run, as they should.
+- [x] 7. Independent cross-check (190 months, exact match), live runs, 3 live trials at 100%
+- [x] 8. Two subagent visual reviews, fixes, docs, lessons
+
+## Review (Task 2)
+
+- **Final:** 90 unit tests. 14/14 scorers in 3 of 3 live trials on the final code. 42/42 red-team cases. The independent cross-check passes. The example deck is 27 pages.
+- **Result:** since 2011, SPY (14.1% CAGR, 0.77 Sharpe) beat every active approach. The best momentum variant was the 3-month (11.2%, 0.59, max drawdown −25.9%). The MA strategy had the best Sharpe among active approaches (0.67, lowest volatility). Charging momentum 5 bps per trade lowers its CAGR by only 0.1–0.3% a year.
+- **Defects found and fixed:**
+  - initial-cost bug
+  - silently dropped page title
+  - **false cost footer** on momentum pages
+  - 60/40 omission
+  - a keyword-based balance check that could be satisfied without making the claim
+  - heatmap legibility, clipped subtitle, scorer heuristics
+- **Known limit:** wrong *claims about* real numbers (e.g. a range with the wrong minimum) can't be caught by numeric checks. Visual review caught one, and a prompt rule now guards it.
+
+---
+
+# Task 1: SPY/IEF MA-rotation multi-agent research and pitch pipeline
 
 Approved plan: `C:\Users\emitb\.claude\plans\piped-imagining-popcorn.md`. Decisions: walk-forward selection, binary switch, all five agents on Claude.
 

@@ -4,6 +4,7 @@ from strategy.agents.display import display
 from strategy.agents.runtime import Agent, Tool, ToolError, schema
 from strategy.analytics import series_metrics
 from strategy.backtest import candidate_table, common_start, daily_rf, run_all, run_ma_backtest
+from strategy.momentum import MomentumError, add_to_returns, run_momentum
 from strategy.paths import write_json, write_text
 
 PROMPT = """You are the Backtest Agent in an investment research pipeline. The strategy holds 100% SPY when SPY closed above its N-day simple moving average the previous day, and 100% IEF otherwise. The candidates are N = {windows}. Each switch costs {cost} bps.
@@ -15,11 +16,19 @@ Your job:
 4. Save the backtest with a short methodology summary.
 5. Reply with a brief note: which MAs the walk-forward chose and how often, the current allocation, and any caveats. Examples: in-sample vs out-of-sample differences, sensitivity to the MA choice, switching frequency.
 
-Rules: the official strategy is the walk-forward result. Never present the best in-sample candidate as the strategy. Quote only numbers the tools return, as given."""
+Rules: the official strategy is the walk-forward result. Never present the best in-sample candidate as the strategy. Quote only numbers the tools return, as given.
+
+You also backtest a second strategy, monthly multi-asset MOMENTUM, across {universe}:
+- There are four sub-strategies, with lookbacks of {lookbacks} months. Run each with run_momentum.
+- At each month-end, rank the six ETFs by trailing return over the lookback and hold 100% of the best one for the next month, starting {mom_start}.
+- If all six trailing returns are negative, that sub-strategy holds cash (0% return) for {cash} months, then resumes.
+- There are no trading costs for momentum.
+save_backtest requires all four lookbacks. In your reply, say which ETF each lookback favored, how often it switched, how many cash months it had, and what it holds now."""
 
 
 def build(ctx):
     cfg = ctx.cfg.strategy
+    mcfg = ctx.cfg.momentum
 
     def need_prices():
         if ctx.prices is None:
@@ -60,6 +69,27 @@ def build(ctx):
         ctx.candidates = candidate_table(ctx.prices, ctx.wf, daily_rf(ctx.prices))
         return {"note": "IN-SAMPLE: uses hindsight; context only", "candidates": display(ctx.candidates)}
 
+    def momentum(lookback_months):
+        need_prices()
+        if lookback_months not in mcfg.lookbacks:
+            raise ToolError(f"Momentum lookbacks are {list(mcfg.lookbacks)}.")
+        try:
+            result = run_momentum(ctx.prices, lookback_months, mcfg.universe, mcfg.start,
+                                  mcfg.cash_months, mcfg.cost_bps)
+        except MomentumError as exc:
+            raise ToolError(str(exc)) from None
+        with ctx.lock:
+            ctx.momentum[lookback_months] = result
+        ctx.record("run_momentum", lookback_months=lookback_months)
+        s = result["summary"]
+        r = result["returns"]
+        return {"lookback_months": lookback_months, "period": f"{r.index.min().date()} to {r.index.max().date()}",
+                "months": s["months"], "switches": s["switches"], "cash_months": s["cash_months"],
+                "cash_episodes": s["cash_episodes"], "current_holding": s["current_holding"],
+                "pct_months_by_holding": {k: f"{v * 100:.1f}%" for k, v in s["pct_months_by_holding"].items()},
+                "total_return": display(float((1 + r).prod() - 1), "total_return"),
+                "recent_picks": [{"month": h["month"], "pick": h["pick"]} for h in result["history"][-6:]]}
+
     def save(methodology_summary):
         done = {c["ma_days"] for c in ctx.calls.get("run_ma_backtest", [])}
         missing = [n for n in cfg.ma_windows if n not in done]
@@ -67,7 +97,16 @@ def build(ctx):
             raise ToolError(f"Backtest every candidate first; missing MA {missing}.")
         if ctx.wf is None or ctx.candidates is None:
             raise ToolError("Run the walk-forward and compare_candidates before saving.")
+        missing_mom = [L for L in mcfg.lookbacks if L not in ctx.momentum]
+        if missing_mom:
+            raise ToolError(f"Run every momentum lookback first; missing {missing_mom} months.")
         ctx.record("save_backtest")
+        ctx.returns = add_to_returns(ctx.returns, ctx.momentum)
+        write_json(ctx.path("momentum.json"), {
+            "params": mcfg.to_dict(),
+            "sub_strategies": {f"MOM{L}": {"summary": r["summary"], "history": r["history"]}
+                               for L, r in sorted(ctx.momentum.items())},
+        })
         hist = ctx.wf["selection_history"]
         ctx.backtest = {
             "params": cfg.to_dict(), "oos_start": str(ctx.wf["oos_start"].date()),
@@ -75,10 +114,11 @@ def build(ctx):
             "selection_history": hist, "candidates_in_sample": ctx.candidates,
             "years_selected": len(hist), "current_allocation_spy": float(ctx.returns["w_spy"].iloc[-1]),
             "methodology_summary": methodology_summary,
+            "momentum": {f"MOM{L}": r["summary"] for L, r in sorted(ctx.momentum.items())},
         }
         write_json(ctx.path("backtest.json"), ctx.backtest)
         write_text(ctx.path("returns.csv"), ctx.returns.to_csv())
-        return {"saved": ["backtest.json", "returns.csv"], "rows": len(ctx.returns)}
+        return {"saved": ["backtest.json", "momentum.json", "returns.csv"], "rows": len(ctx.returns)}
 
     tools = [
         Tool("run_ma_backtest", "Backtest one single-MA switching rule over the full period (in-sample).",
@@ -87,10 +127,16 @@ def build(ctx):
              schema({"min_train_years": {"type": "integer"}}), walk_forward),
         Tool("compare_candidates", "In-sample comparison table of all candidates over the walk-forward period.",
              schema(), compare),
-        Tool("save_backtest", "Save the backtest results with a methodology summary (2-4 sentences).",
+        Tool("run_momentum", "Backtest one monthly momentum sub-strategy (hold the top trailing performer; "
+             "cash for N months when all trailing returns are negative).",
+             schema({"lookback_months": {"type": "integer", "enum": list(mcfg.lookbacks)}}, ["lookback_months"]),
+             momentum),
+        Tool("save_backtest", "Save the backtest results (both strategies) with a methodology summary (2-4 sentences).",
              schema({"methodology_summary": {"type": "string"}}, ["methodology_summary"]), save),
     ]
-    prompt = PROMPT.format(windows=list(cfg.ma_windows), cost=cfg.cost_bps, min_train=cfg.min_train_years)
+    prompt = PROMPT.format(windows=list(cfg.ma_windows), cost=cfg.cost_bps, min_train=cfg.min_train_years,
+                           universe=", ".join(mcfg.universe), lookbacks=list(mcfg.lookbacks),
+                           mom_start=mcfg.start, cash=mcfg.cash_months)
     return Agent(ctx.client, "Backtest Agent", prompt, tools, ctx.trace, effort="low",
                  max_turns=ctx.cfg.max_turns_per_agent, token_budget=ctx.cfg.token_budget, model=ctx.cfg.model)
 

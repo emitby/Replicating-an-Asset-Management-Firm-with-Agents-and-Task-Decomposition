@@ -32,7 +32,8 @@ def test_clean_rejects_short_history():
 def test_ticker_allowlist():
     assert validate_tickers(["SPY", "IEF", "SPY"]) == ["SPY", "IEF"]
     with pytest.raises(DataError):
-        validate_tickers(["SPY", "QQQ"])
+        validate_tickers(["SPY", "TSLA"])
+    assert validate_tickers(["QQQ", "TLT", "GLD", "IWM"]) == ["QQQ", "TLT", "GLD", "IWM"]   # momentum universe
 
 
 def test_quality_report_flags_split_like_jump():

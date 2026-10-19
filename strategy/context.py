@@ -24,6 +24,8 @@ class RunContext:
     returns: pd.DataFrame = None        # daily returns: Strategy, SPY, 60/40, MA*, w_spy, rf
     candidates: dict = None             # in-sample single-MA stats
     backtest: dict = None               # saved backtest summary
+    momentum: dict = field(default_factory=dict)  # lookback -> run_momentum result
+    momentum_saved: dict = None                   # momentum.json (summaries + history)
     analytics: dict = None
     team: dict = None
     slides: list = field(default_factory=list)   # [{"type": "slide"|"metrics_table"|..., ...}]
@@ -45,7 +47,7 @@ class RunContext:
         if self.data_report:
             data_facts = {"rows": self.data_report.get("rows")}
         return NumberIndex(self.analytics or {}, self.backtest or {}, data_facts or {},
-                           constants=self.cfg.strategy.constants())
+                           constants=self.cfg.strategy.constants() | self.cfg.momentum.constants())
 
     def load_artifacts(self, src_dir):
         """Load saved artifacts from an earlier run (for re-running a single stage)."""
@@ -56,6 +58,8 @@ class RunContext:
             self.data_report = read_json(src / "data_report.json")
         if (src / "returns.csv").exists():
             self.returns = pd.read_csv(src / "returns.csv", index_col=0, parse_dates=True)
+        if (src / "momentum.json").exists():
+            self.momentum_saved = read_json(src / "momentum.json")
         if (src / "backtest.json").exists():
             self.backtest = read_json(src / "backtest.json")
             self.candidates = self.backtest.get("candidates_in_sample")

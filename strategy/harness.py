@@ -13,10 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
+import pandas as pd
+
 from strategy import __version__
 from strategy.agents import analytics_agent, backtest_agent, data_agent, presentation_agent, team_agent
 from strategy.agents.runtime import Trace, make_client
-from strategy.config import WINDOWS, PipelineConfig
+from strategy.config import COMPARISON_WINDOWS, WINDOWS, PipelineConfig
 from strategy.context import RunContext
 from strategy.guardrails import check_text
 from strategy.paths import new_run_dir, write_json, write_text
@@ -40,7 +42,11 @@ def _require(cond, msg):
 
 def validate_data(ctx):
     _require(ctx.prices is not None and ctx.path("prices.csv").exists(), "Data Agent did not save a dataset.")
-    _require({"SPY", "IEF", "^IRX"} <= set(ctx.prices.columns), "Dataset is missing a ticker.")
+    _require({"SPY", "IEF", "^IRX", *ctx.cfg.momentum.universe} <= set(ctx.prices.columns),
+             "Dataset is missing a ticker.")
+    first_needed = pd.Timestamp(ctx.cfg.momentum.start) - pd.DateOffset(months=max(ctx.cfg.momentum.lookbacks) + 1)
+    late = [t for t in ctx.cfg.momentum.universe if ctx.prices[t].first_valid_index() > first_needed]
+    _require(not late, f"Not enough history for the momentum lookbacks: {late}.")
     _require(ctx.prices[["SPY", "IEF"]].notna().all().all(), "Dataset has missing ETF prices.")
 
 
@@ -49,12 +55,18 @@ def validate_backtest(ctx):
     ran = {c["ma_days"] for c in ctx.calls.get("run_ma_backtest", [])}
     _require(set(ctx.cfg.strategy.ma_windows) <= ran, f"Not every MA was backtested: {sorted(ran)}.")
     _require(ctx.backtest["years_selected"] >= 5, "Walk-forward produced too few years.")
+    ran_mom = {c["lookback_months"] for c in ctx.calls.get("run_momentum", [])}
+    _require(set(ctx.cfg.momentum.lookbacks) <= ran_mom, f"Not every momentum lookback was run: {sorted(ran_mom)}.")
+    _require(ctx.path("momentum.json").exists(), "momentum.json missing.")
+    _require(all(f"MOM{L}" in ctx.returns.columns for L in ctx.cfg.momentum.lookbacks), "Momentum returns missing.")
 
 
 def validate_analytics(ctx):
     _require(ctx.analytics is not None and ctx.path("analytics.json").exists(), "Analytics Agent did not save.")
     _require(set(WINDOWS) <= set(ctx.analytics["windows"]), "Analytics missing a window.")
-    _require(4 <= len(ctx.analytics.get("findings", [])) <= 7, "Analytics findings missing.")
+    _require(5 <= len(ctx.analytics.get("findings", [])) <= 9, "Analytics findings missing.")
+    _require(set(COMPARISON_WINDOWS) <= set(ctx.analytics.get("comparison", {}).get("windows", {})),
+             "Comparison analytics missing a window.")
 
 
 def validate_team(ctx):

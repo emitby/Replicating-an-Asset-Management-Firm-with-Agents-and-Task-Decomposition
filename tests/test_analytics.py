@@ -74,7 +74,10 @@ def test_adverse_windows_flags_where_strategy_is_worse():
         "5Y": {"series": {"Strategy": {"max_drawdown": -0.26, "sharpe": 0.39}, "SPY": {"max_drawdown": -0.24, "sharpe": 0.57}}},
         "SI": {"series": {"Strategy": {"max_drawdown": -0.26, "sharpe": 0.6}, "SPY": {"max_drawdown": -0.55, "sharpe": 0.5}}},
     }}
-    assert adverse_windows(a) == [{"window": "5Y", "worse_on": ["max_drawdown", "sharpe"]}]
+    assert adverse_windows(a) == [{"window": "5Y", "vs": "SPY", "worse_on": ["max_drawdown", "sharpe"]}]
+    a["windows"]["SI"]["series"]["60/40"] = {"max_drawdown": -0.31, "sharpe": 0.63, "cagr": 0.084}
+    a["windows"]["SI"]["series"]["Strategy"]["cagr"] = 0.076
+    assert {"window": "SI", "vs": "60/40", "worse_on": ["cagr", "sharpe"]} in adverse_windows(a)
 
 
 def test_rolling_summary_bounds(backtest_result):

@@ -29,8 +29,11 @@ ORANGE = colors.HexColor("#c55a11")
 GREY = colors.HexColor("#595959")
 LIGHT = colors.HexColor("#eef3f8")
 
-PERF_FOOTER = ("Hypothetical backtested performance, net of modeled trading costs, not of fees. "
-               "Not actual trading. Past performance does not guarantee future results. See Important Disclosures.")
+# Must be true for every page it appears on, both strategies included. The MA strategy is net of
+# modeled costs; momentum is not. (An earlier version said "net of modeled trading costs" everywhere.)
+PERF_FOOTER = ("Hypothetical backtested performance. Not actual trading; not net of fees. MA strategy results are net "
+               "of modeled trading costs; momentum results exclude trading costs. Past performance does not guarantee "
+               "future results. See Important Disclosures.")
 GEN_FOOTER = "For discussion purposes only. Not an offer or solicitation."
 
 DISCLOSURES = [
@@ -44,6 +47,13 @@ DISCLOSURES = [
     "points per full switch between SPY and IEF. They exclude management fees, taxes and market impact beyond "
     "that assumption, and use adjusted closing prices, which include dividends. Partial calendar years are "
     "year-to-date.",
+    "<b>Momentum methodology.</b> Four monthly momentum sub-strategies (3, 6, 12 and 24-month lookbacks) "
+    "rank SPY, QQQ, TLT, GLD, IWM and IEF by trailing return at each month-end, and hold 100% of the top "
+    "performer for the following month, from January 2011. If all six trailing returns are negative, that "
+    "sub-strategy holds cash at an assumed 0% return for three months and then resumes. Momentum results "
+    "<b>do not include trading costs</b>, while the moving-average strategy is shown net of modeled costs, so "
+    "comparisons between them favor momentum by the cost of its switches. Cash earning 0% understates what "
+    "T-bills paid in some periods.",
     "<b>In-sample results.</b> Comparisons of individual moving-average rules over the full period are "
     "in-sample. They are shown for context only, and overstate what an investor could have known in advance.",
     "<b>Risk.</b> Investing involves risk, including loss of principal. Trend-following signals can lag "
@@ -58,6 +68,10 @@ DISCLOSURES = [
     "for informational purposes only, and is not investment advice, an offer, or a solicitation to buy or "
     "sell any security.",
 ]
+
+# Headers of the code-generated pages (used by evals to find where cited figures must be traceable).
+CODE_PAGE_TITLES = ("Risk and Return by Period", "Context: Each Moving Average", "Supporting Data:",
+                    "Head to Head Since 2011", "Momentum Detail:")
 
 STYLES = {
     "title": ParagraphStyle("title", fontName="Helvetica-Bold", fontSize=22, leading=26, textColor=NAVY),
@@ -110,10 +124,19 @@ class Deck:
     def add_supporting_data(self, analytics):
         self.pages.append(("supporting", dict(analytics=analytics)))
 
+    def add_comparison_table(self, comparison):
+        self.pages.append(("comparison", dict(comparison=comparison)))
+
+    def add_momentum_supporting(self, comparison, momentum_summaries):
+        self.pages.append(("momentum_supporting", dict(comparison=comparison, summaries=momentum_summaries)))
+
     def add_team(self, team):
         members = team["members"]
-        self.pages.append(("team", dict(members=members[:3], heading="Meet the Digital Investment Team")))
-        self.pages.append(("team", dict(members=members[3:], heading="Meet the Digital Investment Team (continued)")))
+        # The fictional label is in the page title too, so a single page lifted from the deck can't read as real.
+        self.pages.append(("team", dict(members=members[:3],
+                                        heading="Meet the Digital Investment Team (AI-generated, fictional)")))
+        self.pages.append(("team", dict(members=members[3:],
+                                        heading="Digital Investment Team, continued (AI-generated, fictional)")))
 
     # ------------------------------------------------------------------ build
 
@@ -127,7 +150,8 @@ class Deck:
         total = len(self.pages) + 2
         for i, (kind, args) in enumerate(self.pages, start=2):
             getattr(self, f"_draw_{kind}")(c, **args)
-            perf = args.get("performance", kind in ("metrics", "candidates", "supporting"))
+            perf = args.get("performance", kind in ("metrics", "candidates", "supporting", "comparison",
+                                                    "momentum_supporting"))
             self._footer(c, i, total, perf)
             c.showPage()
         self._disclosures(c)
@@ -139,8 +163,10 @@ class Deck:
     def _header(self, c, title):
         c.setFillColor(NAVY)
         c.rect(0, PAGE_H - 0.18 * inch, PAGE_W, 0.18 * inch, fill=1, stroke=0)
-        f = Frame(0.6 * inch, PAGE_H - 1.15 * inch, PAGE_W - 1.2 * inch, 0.85 * inch, showBoundary=0)
-        f.addFromList([_p(_safe(title), "title")], c)
+        w, h = PAGE_W - 1.2 * inch, 0.85 * inch
+        f = Frame(0.6 * inch, PAGE_H - 1.15 * inch, w, h, showBoundary=0)
+        # KeepInFrame shrinks a long title instead of letting the Frame silently drop it.
+        f.addFromList([KeepInFrame(w, h, [_p(_safe(title), "title")], mode="shrink")], c)
 
     def _footer(self, c, page, total, performance):
         c.setStrokeColor(colors.HexColor("#d9d9d9"))
@@ -154,15 +180,18 @@ class Deck:
     def _cover(self, c):
         c.setFillColor(NAVY)
         c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
-        c.setFillColor(ORANGE)
-        c.rect(0.8 * inch, 4.35 * inch, 1.2 * inch, 0.08 * inch, fill=1, stroke=0)
         c.setFillColor(colors.white)
-        c.setFont("Helvetica-Bold", 34)
-        c.drawString(0.8 * inch, 5.0 * inch, self.title)
-        c.setFont("Helvetica", 16)
-        c.drawString(0.8 * inch, 4.6 * inch, self.subtitle)
+        c.setFont("Helvetica-Bold", 34 if len(self.title) <= 34 else 28)
+        c.drawString(0.8 * inch, 5.4 * inch, self.title)
+        # Wrapped paragraph: a long subtitle was clipped at the page edge when drawn as one line.
+        sub = ParagraphStyle("cover_sub", fontName="Helvetica", fontSize=15, leading=19, textColor=colors.white)
+        Frame(0.8 * inch, 4.35 * inch, PAGE_W - 1.6 * inch, 0.9 * inch, showBoundary=0).addFromList(
+            [KeepInFrame(PAGE_W - 1.6 * inch, 0.9 * inch, [Paragraph(_safe(self.subtitle), sub)], mode="shrink")], c)
+        c.setFillColor(ORANGE)
+        c.rect(0.8 * inch, 4.15 * inch, 1.2 * inch, 0.08 * inch, fill=1, stroke=0)
+        c.setFillColor(colors.white)
         c.setFont("Helvetica", 11)
-        c.drawString(0.8 * inch, 3.9 * inch, f"Prepared {date.today():%B %d, %Y}")
+        c.drawString(0.8 * inch, 3.7 * inch, f"Prepared {date.today():%B %d, %Y}")
         c.setFont("Helvetica-Oblique", 9)
         c.drawString(0.8 * inch, 0.6 * inch, "Hypothetical backtested results. For discussion purposes only. "
                      "Generated by an AI multi-agent research pipeline.")
@@ -257,7 +286,7 @@ class Deck:
                                 "small")], c)
 
     def _draw_supporting(self, c, analytics):
-        self._header(c, "Supporting Data: Calendar Years, Rolling Returns, Growth of $10,000")
+        self._header(c, "Supporting Data: Calendar Years and Rolling Returns")
         years = analytics.get("calendar_years", {})
         end = analytics["windows"]["SI"]["end"]
         rows = [["Year", "Strategy", "SPY", "60/40"]]
@@ -294,6 +323,98 @@ class Deck:
             [_p(f"Calendar-year returns are total returns. The final year is year-to-date through {end}. "
                 "Rolling figures cover every 252-trading-day window since the walk-forward start. "
                 "60/40 is rebalanced daily, without costs.", "small")], c)
+
+    COMP_SERIES = ("MOM3", "MOM6", "MOM12", "MOM24", "MA Strategy", "SPY")
+    COMP_LABELS = {"MOM3": "3-month momentum", "MOM6": "6-month momentum", "MOM12": "12-month momentum",
+                   "MOM24": "24-month momentum", "MA Strategy": "MA trend strategy", "SPY": "SPY (buy and hold)"}
+    COMP_FIELDS = (("CAGR", "cagr", pct), ("Total", "total_return", pct), ("Vol.", "volatility", pct),
+                   ("Sharpe", "sharpe", num), ("Sortino", "sortino", num), ("Max DD", "max_drawdown", pct),
+                   ("Calmar", "calmar", num), ("Beta", "beta", num), ("Corr.", "correlation", num),
+                   ("Up cap.", "up_capture", pct), ("Down cap.", "down_capture", pct))
+
+    def _draw_comparison(self, c, comparison):
+        self._header(c, "Head to Head Since 2011: Momentum vs MA Strategy vs SPY")
+        wins = [w for w in ("3M", "1Y", "3Y", "5Y", "S2011") if w in comparison["windows"]]
+        head = ["Return (3M total, else annualized)"] + ["Since 2011" if w == "S2011" else w for w in wins]
+        a = [head]
+        for s in self.COMP_SERIES:
+            row = [self.COMP_LABELS[s]]
+            for w in wins:
+                m = comparison["windows"][w]["series"][s]
+                row.append(pct(m.get("cagr", m["total_return"])))
+            a.append(row)
+        h1 = self._table(c, a, [2.6 * inch] + [1.05 * inch] * len(wins), PAGE_H - 1.3 * inch, padding=2.5)
+        s2011 = comparison["windows"]["S2011"]["series"]
+        b = [["Since 2011"] + [f[0] for f in self.COMP_FIELDS]]
+        for s in self.COMP_SERIES:
+            b.append([self.COMP_LABELS[s]] + [fmt(s2011[s].get(key)) for _, key, fmt in self.COMP_FIELDS])
+        widths = [1.75 * inch] + [0.67 * inch] * (len(self.COMP_FIELDS) - 2) + [0.82 * inch] * 2   # capture headers
+        h2 = self._table(c, b, widths, PAGE_H - 1.5 * inch - h1, padding=2.5)
+        span = comparison["windows"]["S2011"]
+        note_top = PAGE_H - 1.6 * inch - h1 - h2
+        Frame(0.6 * inch, 0.66 * inch, PAGE_W - 1.2 * inch, note_top - 0.66 * inch, showBoundary=0).addFromList(
+            [_p(f"Common period {span['start']} to {span['end']}. Momentum: hold the top trailing performer of SPY, "
+                "QQQ, TLT, GLD, IWM and IEF each month, or cash (0%) for 3 months when all are negative. "
+                "<b>Momentum excludes trading costs; the MA strategy is net of modeled costs.</b> Ratios use the "
+                "13-week T-bill as the risk-free rate. Beta, correlation and capture are measured vs SPY.", "small")], c)
+
+    def _draw_momentum_supporting(self, c, comparison, summaries):
+        self._header(c, "Momentum Detail: Calendar Years, Holdings and Activity")
+        years = comparison.get("calendar_years", {})
+        end = comparison["end"]
+        rows = [["Year", "3M", "6M", "12M", "24M", "MA", "SPY"]]
+        for y, r in years.items():
+            label = f"{y} YTD" if str(y) == end[:4] and end[5:] < "12-24" else str(y)
+            rows.append([label] + [pct(r[s]) for s in self.COMP_SERIES])
+        t = Table(rows, colWidths=[0.75 * inch] + [0.62 * inch] * 6)
+        t.setStyle(TableStyle([
+            ("FONT", (0, 0), (-1, -1), "Helvetica", 8), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
+            ("TOPPADDING", (0, 0), (-1, -1), 1.6), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6)]))
+        _, h = t.wrapOn(c, PAGE_W, PAGE_H)
+        t.drawOn(c, 0.6 * inch, PAGE_H - 1.3 * inch - h)
+
+        x0, w_right = 5.05 * inch, PAGE_W - 5.05 * inch - 0.6 * inch
+        act = comparison["windows"]["S2011"]["momentum_activity"]
+        assets = ("SPY", "QQQ", "TLT", "GLD", "IWM", "IEF", "CASH")
+        rows2 = [["Since 2011", "Months", "Switches", "Cash mo.", "Holding now"]]
+        for s in self.COMP_SERIES[:4]:
+            a = act[s]
+            rows2.append([self.COMP_LABELS[s].replace(" momentum", ""), str(a["months"]), str(a["switches"]),
+                          str(a["cash_months"]), a["current_holding"]])
+        rows3 = [["% of months held"] + list(assets)]
+        for s in self.COMP_SERIES[:4]:
+            share = summaries[s]["pct_months_by_holding"]
+            rows3.append([self.COMP_LABELS[s].replace(" momentum", "")] +
+                         [pct(share[a]) if a in share else "-" for a in assets])
+        growth = comparison.get("growth_of_10000", {})
+        rows4 = [["Growth of $10,000 since 2011", "Value"]] + \
+                [[self.COMP_LABELS[s], f"${growth[s]:,.0f}"] for s in self.COMP_SERIES if s in growth]
+        cs = comparison.get("cost_sensitivity", {})
+        bps = next(iter(cs.values()))["cost_bps"] if cs else self.cost_bps
+        rows5 = [[f"If charged {bps:g} bps per trade", "Trades*", "CAGR as shown", "CAGR with costs"]] + \
+                [[self.COMP_LABELS[s].replace(" momentum", ""), str(cs[s]["trades"]), pct(cs[s]["cagr_gross"]),
+                  pct(cs[s]["cagr_with_costs"])] for s in self.COMP_SERIES[:4] if s in cs]
+        y = PAGE_H - 1.3 * inch
+        for data, widths in ((rows2, [1.2 * inch, 0.65 * inch, 0.7 * inch, 0.75 * inch, 0.95 * inch]),
+                             (rows3, [1.12 * inch] + [0.5 * inch] * 7),
+                             (rows5, [1.6 * inch, 0.65 * inch, 0.95 * inch, 1.05 * inch]),
+                             (rows4, [2.6 * inch, 1.2 * inch])):
+            tt = Table(data, colWidths=widths)
+            tt.setStyle(TableStyle([
+                ("FONT", (0, 0), (-1, -1), "Helvetica", 8.5), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8.5),
+                ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ALIGN", (1, 0), (-1, -1), "RIGHT"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
+                ("TOPPADDING", (0, 0), (-1, -1), 2.2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.2)]))
+            _, th = tt.wrapOn(c, w_right, PAGE_H)
+            tt.drawOn(c, x0, y - th)
+            y -= th + 0.22 * inch
+        Frame(x0, 0.66 * inch, w_right, y - 0.66 * inch, showBoundary=0).addFromList(
+            [_p(f"Calendar-year returns are total returns; the final year is year-to-date through {end}. "
+                "3M/6M/12M/24M = momentum lookbacks; MA = moving-average trend strategy. Momentum excludes trading costs. "
+                "*Trades = switches plus the initial purchase in January 2011.",
+                "small")], c)
 
     def _draw_candidates(self, c, candidates, history, period=None):
         self._header(c, "Context: Each Moving Average Over the Full Period (IN-SAMPLE)")

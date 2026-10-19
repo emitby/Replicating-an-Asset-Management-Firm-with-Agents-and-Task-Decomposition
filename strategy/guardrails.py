@@ -23,6 +23,8 @@ BANNED_PATTERNS = [
     # sales urgency / market-timing calls
     r"\bact now\b", r"\bdon'?t miss\b", r"\bnow is the (time|moment)\b", r"\bwhy .{0,20}\bnow\b",
     r"\blimited time\b",
+    # overclaiming certainty about a rules-based selection
+    r"\balways (picks|wins|beats|outperforms|chooses the (winner|best))\b", r"\bnever (misses|underperforms)\b",
 ]
 
 

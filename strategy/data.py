@@ -76,7 +76,9 @@ def quality_report(df):
     for col in df.columns:
         s = df[col]
         valid = s.dropna()
-        info = {"missing": int(s.isna().sum()), "first": str(valid.index.min().date()) if len(valid) else None}
+        # Missing values before a ticker's first trade (e.g. GLD launched in 2004) aren't data errors.
+        live = s.loc[valid.index.min():] if len(valid) else s
+        info = {"missing": int(live.isna().sum()), "first": str(valid.index.min().date()) if len(valid) else None}
         if col != RATE_TICKER and len(valid) > 1:
             rets = valid.pct_change().dropna()
             info["max_abs_daily_return"] = round(float(rets.abs().max()), 4)
@@ -130,4 +132,10 @@ def synthetic_prices(years=20, seed=7):
     spy = 100 * np.exp(np.cumsum(0.0003 + 0.0006 * regime + 0.011 * rng.standard_normal(len(idx))))
     ief = 80 * np.exp(np.cumsum(0.00015 - 0.0002 * regime + 0.004 * rng.standard_normal(len(idx))))
     irx = np.clip(2.0 + 1.5 * regime + 0.05 * np.cumsum(rng.standard_normal(len(idx))) / 10, 0, 6)
-    return pd.DataFrame({RISK_ASSET: spy, SAFE_ASSET: ief, RATE_TICKER: irx}, index=idx)
+    df = pd.DataFrame({RISK_ASSET: spy, SAFE_ASSET: ief, RATE_TICKER: irx}, index=idx)
+    # Momentum universe: drawn after the series above, so SPY/IEF are unchanged for older tests.
+    for name, drift, vol, phase in (("QQQ", 0.0004, 0.014, 0.5), ("TLT", 0.0002, 0.009, 3.0),
+                                    ("GLD", 0.0002, 0.010, 1.7), ("IWM", 0.0003, 0.015, 0.9)):
+        trend = 0.0007 * np.sin(np.arange(len(idx)) / 300.0 + phase)
+        df[name] = 100 * np.exp(np.cumsum(drift + trend + vol * rng.standard_normal(len(idx))))
+    return df

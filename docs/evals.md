@@ -30,6 +30,9 @@ These score a finished run directory, the latest by default, for free. Every sco
 | `narrative_faithfulness` | 100% | Every number in slides and findings is supported (reports the count checked) |
 | `compliance_language` | 100% | No banned phrases in slides, findings or bios |
 | `pdf_disclosures` | 100% | Disclosure on every performance page, a footer on every page, disclosures page last, IN-SAMPLE label, cover marked hypothetical, cost assumption stated, partial year labeled YTD |
+| `momentum_reproducible` | 100% | Re-running all four lookbacks from `prices.csv` reproduces the saved picks and daily returns. Each month's compounded return equals the held ETF's month-over-month return. The first invested month is January 2011. |
+| `momentum_tool_coverage` | 100% | The trace shows all 4 lookbacks run and all 5 comparison windows computed |
+| `pros_cons_coverage` | 100% | A Pro/Con slide per lookback whose "Con:" bullets cover every metric where it trailed SPY. A comparison slide and an Executive Summary verdict. The cost asymmetry disclosed. Comparison and momentum-detail pages present. |
 | `balance_and_traceability` | 100% | Every window where the strategy did worse than SPY (drawdown or Sharpe) is acknowledged on a slide. Every percentage on an agent slide appears verbatim on a code-generated table page. |
 | `team_quality` | 100% | Schema valid, 1 PM + 5 analysts, PM most senior, careers plausible against graduation years, at least 3 certified members, 6 fictional stamps, 2 team pages |
 | `pdf_structure` | 100% | 10–20 pages, ≥3 charts, metrics table, SPY comparison, all periods covered, trade-offs discussed, 6–12 agent slides |
@@ -76,7 +79,25 @@ A second visual review, plus repeated **live trials**, exposed more gaps. Each w
 | Live trials | Intermittent: "not a guaranteed hedge" in a bio flagged at eval time but never checked at submit time | Negation-aware guarantee rule, and bios checked when the team is submitted |
 | Own review | The metrics footnote was silently dropped when its frame had no room | Compact tables, plus a regression test |
 
-**Final state:** 11/11 scorers pass in **3 of 3 live trials** and on the final run. 39/39 red-team cases pass. 75 unit tests pass.
+**Final state, MA only:** 11/11 scorers passed in 3 of 3 live trials. 39/39 red-team cases passed. 75 unit tests passed.
+
+### Adding the momentum strategy
+
+| Found by | Problem | Fix |
+|---|---|---|
+| Unit tests | Momentum's initial-purchase cost was never charged: pandas sums an all-NaN diff row to 0, so `fillna` never fired | Set the first day's turnover explicitly |
+| Live run | The traceability scorer excluded the code-generated comparison page, because the agent's slide title overlapped its header | Code pages are identified by known headers (`pdf.CODE_PAGE_TITLES`), matched anywhere on the page |
+| Scorer debugging | **A page title was silently missing.** A two-line title didn't fit the header frame, and ReportLab dropped it without an error. This happened on the supporting-data page since the start. | Headers shrink to fit (`KeepInFrame`), and a test asserts every code page renders its title |
+| Independent cross-check | None. Picks matched for all 190 months, and total returns matched to 1e-15. | `evals/crosscheck_momentum.py`, standalone code that doesn't import the project's momentum module |
+| Visual review | **The footer said "net of modeled trading costs" on momentum pages, which are gross** | The footer now states both: MA net of costs, momentum excludes costs. Regression test added. |
+| Visual review | The deck never said 60/40 beat the MA strategy since 2007 | `adverse_windows` includes 60/40 since inception |
+| Visual review, then own debugging | The balance check passed anyway: it matched keywords anywhere on a slide ("60/40" in one bullet, "Sharpe" in another) | Acknowledgement now requires the metric **and** the benchmark in the **same bullet** |
+| Visual review | No verdict in the Executive Summary | A verdict across both strategies is required by code |
+| Visual review | Cost asymmetry not quantified | Code-computed cost sensitivity (momentum CAGR at 5 bps per trade) |
+| Visual review | Heatmap colors indistinguishable, cash invisible, cover subtitle clipped | Distinct hues, hatched grey cash, wrapped subtitle |
+| Visual review | A wrong range ("36.9% to 63.7%" when one variant was 26.3%), and a 0.4-point tie claimed as a Pro | Prompt rules. **A known limit of code checks:** each number was real, and only the claim about them was wrong. Visual review covers this. |
+
+**Final state, both strategies:** 14/14 scorers pass in 3 of 3 live trials and on the final run. 42/42 red-team cases pass. 90 unit tests pass. The independent cross-check passes.
 
 The takeaway is built into this suite: code-graded evals verify what they check, so keep reviewing the rendered output, run several live trials, and turn every new finding into a check.
 

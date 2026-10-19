@@ -11,7 +11,7 @@ Conventions:
 import numpy as np
 import pandas as pd
 
-from strategy.config import ANNUALIZE_FROM_MONTHS, TRADING_DAYS, WINDOWS
+from strategy.config import ANNUALIZE_FROM_MONTHS, COMPARISON_WINDOWS, TRADING_DAYS, WINDOWS
 
 SERIES = ("Strategy", "SPY", "60/40")
 
@@ -71,16 +71,12 @@ def series_metrics(r, rf, annualize, bench=None):
     return m
 
 
-def compute_window(returns, label):
-    """Metrics for every series over one trailing window."""
-    if label not in WINDOWS:
-        raise ValueError(f"Unknown window {label!r}; use one of {list(WINDOWS)}.")
-    months = WINDOWS[label]
-    df = window_slice(returns, months)
+def _window_metrics(df, label, months, series):
+    """Shared by the MA analytics and the momentum comparison, so both use identical definitions."""
     annualize = months is None or months >= ANNUALIZE_FROM_MONTHS
     out = {"window": label, "start": str(df.index.min().date()), "end": str(df.index.max().date()),
            "annualized": annualize, "series": {}}
-    for name in SERIES:
+    for name in series:
         m = series_metrics(df[name], df["rf"], annualize, bench=df["SPY"])
         if months == 12:
             # A one-year window's annual return IS its total return. Annualizing ~250 trading
@@ -88,6 +84,98 @@ def compute_window(returns, label):
             m["cagr"] = m["total_return"]
             m["calmar"] = m["cagr"] / abs(m["max_drawdown"]) if m["max_drawdown"] < 0 else float("nan")
         out["series"][name] = m
+    return out
+
+
+MOMENTUM_SERIES_FMT = "MOM{}"
+COMPARISON_MA = "MA Strategy"
+
+
+def comparison_frame(returns, lookbacks):
+    """Daily returns for the head-to-head: MOM3..MOM24, the MA strategy and SPY, from the momentum start."""
+    mom_cols = [MOMENTUM_SERIES_FMT.format(L) for L in lookbacks]
+    df = returns[[*mom_cols, "Strategy", "SPY", "rf"]].dropna(subset=mom_cols)
+    return df.rename(columns={"Strategy": COMPARISON_MA})
+
+
+def comparison_window(returns, label, lookbacks):
+    """Metrics for all momentum sub-strategies, the MA strategy and SPY over one window of the common period."""
+    if label not in COMPARISON_WINDOWS:
+        raise ValueError(f"Unknown window {label!r}; use one of {list(COMPARISON_WINDOWS)}.")
+    months = COMPARISON_WINDOWS[label]
+    df = comparison_frame(returns, lookbacks)
+    names = [*(MOMENTUM_SERIES_FMT.format(L) for L in lookbacks), COMPARISON_MA, "SPY"]
+    out = _window_metrics(window_slice(df, months), label, months, names)
+    sliced = window_slice(returns, months).loc[df.index.min():]
+    out["momentum_activity"] = {}
+    for L in lookbacks:
+        hold = sliced[f"hold_MOM{L}"]
+        monthly = hold.groupby(hold.index.to_period("M")).first()
+        out["momentum_activity"][MOMENTUM_SERIES_FMT.format(L)] = {
+            "switches": int((monthly != monthly.shift()).iloc[1:].sum()),
+            "cash_months": int((monthly == "CASH").sum()),
+            "months": int(len(monthly)),
+            "current_holding": str(monthly.iloc[-1]),
+        }
+    return out
+
+
+def cost_sensitivity(returns, lookbacks, cost_bps):
+    """What momentum would have earned paying the MA strategy's cost per switch (momentum is shown gross).
+    Every change of holding (including into or out of cash) and the initial purchase count as one trade."""
+    df = comparison_frame(returns, lookbacks)
+    out = {}
+    for L in lookbacks:
+        name = MOMENTUM_SERIES_FMT.format(L)
+        hold = returns.loc[df.index, f"hold_{name}"]
+        trades = (hold != hold.shift()).astype(float)        # first day is True: the initial purchase
+        net = df[name] - trades * cost_bps / 10_000.0
+        years = len(net) / TRADING_DAYS
+        gross_cagr = float((1 + df[name]).prod() ** (1 / years) - 1)
+        net_cagr = float((1 + net).prod() ** (1 / years) - 1)
+        out[name] = {"trades": int(trades.sum()), "cost_bps": cost_bps,
+                     "cagr_gross": gross_cagr, "cagr_with_costs": net_cagr}
+    return out
+
+
+def comparison_extras(returns, lookbacks, cost_bps=5.0):
+    df = comparison_frame(returns, lookbacks)
+    cols = [c for c in df.columns if c != "rf"]
+    yearly = (1 + df[cols]).groupby(df.index.year).prod() - 1
+    return {
+        "calendar_years": {int(y): {k: float(v) for k, v in row.items()} for y, row in yearly.iterrows()},
+        "growth_of_10000": {c: float(10_000 * (1 + df[c]).prod()) for c in cols},
+        "cost_sensitivity": cost_sensitivity(returns, lookbacks, cost_bps),
+        "start": str(df.index.min().date()), "end": str(df.index.max().date()),
+    }
+
+
+def momentum_adverse(comparison):
+    """For each sub-strategy: metrics where it did worse than SPY since 2011 (its 'Con' obligations)."""
+    s2011 = comparison["windows"]["S2011"]["series"]
+    spy = s2011["SPY"]
+    out = {}
+    for name, m in s2011.items():
+        if not name.startswith("MOM"):
+            continue
+        worse = []
+        if m["max_drawdown"] < spy["max_drawdown"]:
+            worse.append("max_drawdown")
+        if m["sharpe"] < spy["sharpe"]:
+            worse.append("sharpe")
+        if m["cagr"] < spy["cagr"]:
+            worse.append("cagr")
+        out[name] = worse
+    return out
+
+
+def compute_window(returns, label):
+    """Metrics for every series over one trailing window."""
+    if label not in WINDOWS:
+        raise ValueError(f"Unknown window {label!r}; use one of {list(WINDOWS)}.")
+    months = WINDOWS[label]
+    df = window_slice(returns, months)
+    out = _window_metrics(df, label, months, SERIES)
     w = df["w_spy"]
     out["strategy_activity"] = {
         "switches": int(w.diff().abs().fillna(0).gt(0).sum()),
@@ -98,14 +186,17 @@ def compute_window(returns, label):
         "total_return": out["series"]["Strategy"]["total_return"] - out["series"]["SPY"]["total_return"],
         "max_drawdown": out["series"]["Strategy"]["max_drawdown"] - out["series"]["SPY"]["max_drawdown"],
     }
-    if annualize:
+    if out["annualized"]:
         out["excess_vs_spy"]["cagr"] = out["series"]["Strategy"]["cagr"] - out["series"]["SPY"]["cagr"]
     return out
 
 
 def adverse_windows(analytics):
-    """Windows where the strategy was worse than SPY on max drawdown or Sharpe. The deck must
-    acknowledge these, so the pitch can't cherry-pick favorable periods."""
+    """Where the MA strategy did worse than its benchmarks, which the deck must acknowledge so the
+    pitch can't cherry-pick:
+    - vs SPY, in any window, on max drawdown or Sharpe
+    - vs 60/40, since inception, on return or Sharpe (a reviewer found the deck omitted 60/40 beating it)
+    """
     out = []
     for w, data in analytics["windows"].items():
         s, b = data["series"]["Strategy"], data["series"]["SPY"]
@@ -115,7 +206,13 @@ def adverse_windows(analytics):
         if "sharpe" in s and s["sharpe"] == s["sharpe"] and s["sharpe"] < b["sharpe"]:
             worse.append("sharpe")
         if worse:
-            out.append({"window": w, "worse_on": worse})
+            out.append({"window": w, "vs": "SPY", "worse_on": worse})
+    si = analytics["windows"].get("SI", {}).get("series", {})
+    if "60/40" in si:
+        s, mix = si["Strategy"], si["60/40"]
+        worse = [k for k in ("cagr", "sharpe") if k in s and s[k] < mix[k]]
+        if worse:
+            out.append({"window": "SI", "vs": "60/40", "worse_on": worse})
     return out
 
 

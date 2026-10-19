@@ -11,14 +11,23 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.ticker as mtick  # noqa: E402
+import numpy as np  # noqa: E402
+from matplotlib.colors import ListedColormap  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from strategy.analytics import drawdown_series  # noqa: E402
 from strategy.paths import PROJECT_DIR, confine  # noqa: E402
 
-COLORS = {"Strategy": "#1f4e79", "SPY": "#c55a11", "60/40": "#7f7f7f"}
+COLORS = {"Strategy": "#1f4e79", "SPY": "#c55a11", "60/40": "#7f7f7f", "MA Strategy": "#1f4e79",
+          "MOM3": "#9dc3e6", "MOM6": "#2e9e6b", "MOM12": "#7030a0", "MOM24": "#bf9000"}
+# Distinct hues per asset (an earlier palette made SPY/QQQ/GLD look alike); cash is light grey and hatched.
+ASSET_COLORS = {"SPY": "#d62728", "QQQ": "#9467bd", "IWM": "#2ca02c", "TLT": "#1f3a93", "IEF": "#17becf",
+                "GLD": "#ffbf00", "CASH": "#d9d9d9"}
 CHART_KINDS = ("equity_vs_spy", "drawdowns", "rolling_1y", "allocation", "window_returns",
-               "ma_selection", "calendar_years")
+               "ma_selection", "calendar_years",
+               "momentum_vs_spy", "momentum_drawdowns", "momentum_holdings", "comparison_returns")
+MOM_SERIES = ("MOM3", "MOM6", "MOM12", "MOM24")
 
 
 class ChartError(ValueError):
@@ -126,4 +135,81 @@ def render(kind, out_dir, returns, analytics=None, history=None):
         ax.axhline(0, color="#999999", lw=0.8)
         _style(ax, "Calendar-year returns (final year is year-to-date)" if "YTD" in labels[-1] else "Calendar-year returns")
         ax.legend(frameon=False)
+    elif kind in ("momentum_vs_spy", "momentum_drawdowns", "momentum_holdings", "comparison_returns"):
+        _momentum_chart(kind, ax, fig, returns, analytics)
     return _save(fig, out_dir, kind)
+
+
+def _momentum_frame(returns):
+    missing = [c for c in MOM_SERIES if c not in returns.columns]
+    if missing:
+        raise ChartError(f"Momentum returns missing: {missing}.")
+    df = returns.dropna(subset=list(MOM_SERIES))
+    return df.rename(columns={"Strategy": "MA Strategy"})
+
+
+def _momentum_chart(kind, ax, fig, returns, analytics):
+    df = _momentum_frame(returns)
+    lines = [*MOM_SERIES, "MA Strategy", "SPY"]
+    if kind == "momentum_vs_spy":
+        for s in lines:
+            ax.plot((1 + df[s]).cumprod() * 10_000, label=s, color=COLORS[s],
+                    lw=2.0 if s in ("SPY", "MA Strategy") else 1.5, ls="--" if s == "MA Strategy" else "-")
+        ax.set_yscale("log")
+        ax.yaxis.set_major_locator(mtick.LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+        ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
+        ax.yaxis.set_minor_formatter(mtick.NullFormatter())
+        _style(ax, f"Growth of $10,000 since {df.index.min():%b %Y} (log scale)", pct_y=False)
+        ax.legend(frameon=False, ncols=3, loc="upper left")
+    elif kind == "momentum_drawdowns":
+        spy_dd = drawdown_series(df["SPY"])
+        ax.fill_between(spy_dd.index, spy_dd, 0, color=COLORS["SPY"], alpha=0.15, lw=0)
+        for s in lines:
+            ax.plot(drawdown_series(df[s]), label=s, color=COLORS[s], lw=1.2,
+                    ls="--" if s == "MA Strategy" else "-")
+        _style(ax, f"Drawdown from peak since {df.index.min():%b %Y}")
+        ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncols=6, fontsize=8)
+    elif kind == "momentum_holdings":
+        assets = list(ASSET_COLORS)
+        rows = []
+        for s in MOM_SERIES:
+            hold = df[f"hold_{s}"]
+            monthly = hold.groupby(hold.index.to_period("M")).first()
+            rows.append([assets.index(a) for a in monthly])
+        months = monthly.index
+        grid = np.array(rows)
+        ax.imshow(grid, aspect="auto", interpolation="nearest",
+                  cmap=ListedColormap([ASSET_COLORS[a] for a in assets]), vmin=0, vmax=len(assets) - 1)
+        cash = assets.index("CASH")
+        for r, row in enumerate(grid):           # hatch cash cells so they can't be mistaken for background
+            for col in np.flatnonzero(row == cash):
+                ax.add_patch(plt.Rectangle((col - 0.5, r - 0.5), 1, 1, fill=False, hatch="////",
+                                           edgecolor="#595959", lw=0))
+        ax.set_yticks(range(len(MOM_SERIES)), [f"{s[3:]}-month" for s in MOM_SERIES])
+        ax.set_yticks(np.arange(-0.5, len(MOM_SERIES)), minor=True)
+        ax.grid(which="minor", axis="y", color="white", lw=3)
+        ax.tick_params(which="minor", length=0)
+        ticks = [i for i, m in enumerate(months) if m.month == 1]
+        ax.set_xticks(ticks, [str(months[i].year) for i in ticks], fontsize=8, rotation=45)
+        ax.set_title("Monthly holding by lookback (hatched grey = cash)", loc="left", fontsize=13, fontweight="bold")
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.legend(handles=[Patch(facecolor=ASSET_COLORS[a], edgecolor="#595959", label=a,
+                                 hatch="////" if a == "CASH" else None) for a in assets],
+                  frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncols=7, fontsize=9)
+    elif kind == "comparison_returns":
+        comp = (analytics or {}).get("comparison", {}).get("windows")
+        if not comp:
+            raise ChartError("comparison_returns needs the comparison analytics.")
+        wins = [w for w in ("3M", "1Y", "3Y", "5Y", "S2011") if w in comp]
+        width = 0.13
+        for i, s in enumerate(lines):
+            vals = [comp[w]["series"][s].get("cagr", comp[w]["series"][s]["total_return"]) for w in wins]
+            xs = [x + (i - 2.5) * width for x in range(len(wins))]
+            ax.bar(xs, vals, width, label=s, color=COLORS[s], edgecolor="white", lw=0.4,
+                   hatch="//" if s == "MA Strategy" else None)
+        labels = {"S2011": "Since 2011"}
+        ax.set_xticks(range(len(wins)), [f"{labels.get(w, w)}{' (ann.)' if comp[w]['annualized'] else ''}" for w in wins])
+        ax.axhline(0, color="#999999", lw=0.8)
+        _style(ax, "Returns by period: momentum lookbacks vs MA strategy and SPY")
+        ax.legend(frameon=False, ncols=6, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.08))

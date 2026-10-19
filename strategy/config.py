@@ -6,7 +6,8 @@ from dataclasses import asdict, dataclass, field
 RISK_ASSET = "SPY"
 SAFE_ASSET = "IEF"
 RATE_TICKER = "^IRX"          # 13-week T-bill yield, % annualized: the risk-free rate
-ALLOWED_TICKERS = (RISK_ASSET, SAFE_ASSET, RATE_TICKER)
+MOMENTUM_UNIVERSE = ("SPY", "QQQ", "TLT", "GLD", "IWM", "IEF")
+ALLOWED_TICKERS = tuple(dict.fromkeys((*MOMENTUM_UNIVERSE, RISK_ASSET, SAFE_ASSET, RATE_TICKER)))
 
 TRADING_DAYS = 252
 
@@ -33,9 +34,31 @@ class StrategyConfig:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class MomentumConfig:
+    """Monthly relative momentum: hold the single best trailing performer for the next month.
+    Each lookback is a separate sub-strategy. If all trailing returns are negative, that
+    sub-strategy holds cash at 0% for `cash_months` months, then resumes."""
+    universe: tuple = MOMENTUM_UNIVERSE
+    lookbacks: tuple = (3, 6, 12, 24)        # months
+    start: str = "2011-01-01"                # first invested month
+    cash_months: int = 3
+    cost_bps: float = 0.0                    # user decision: no modeled costs (disclosed)
+
+    def constants(self):
+        return {*self.lookbacks, self.cash_months, len(self.universe), 2011}
+
+    def to_dict(self):
+        return asdict(self)
+
+
+COMPARISON_WINDOWS = {"3M": 3, "1Y": 12, "3Y": 36, "5Y": 60, "S2011": None}   # None = since momentum start
+
+
 @dataclass
 class PipelineConfig:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
+    momentum: MomentumConfig = field(default_factory=MomentumConfig)
     model: str = "claude-opus-5-5"
     max_turns_per_agent: int = 20
     token_budget: int = 3_000_000          # hard cap on input + output tokens per run
