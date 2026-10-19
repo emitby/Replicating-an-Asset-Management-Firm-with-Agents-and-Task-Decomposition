@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spy-ief-strategy"
+version = "0.1.0"
+description = "Five Claude agents research, backtest, analyze and pitch a SPY/IEF moving-average rotation strategy"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=1.15", "yfinance>=0.2.50", "pandas>=2.2", "numpy>=1.26", "matplotlib>=3.8",
+    "reportlab>=4.0", "pypdf>=4.0", "pymupdf>=1.24", "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["strategy*", "evals*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+addopts = "-p no:cacheprovider"

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install into project-local venv
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --no-cache-dir -r requirements.txt
+      - name: Unit tests (offline, via launcher so caches stay in the project)
+        run: sh ./run.sh test -q
+      - name: Guardrail red-team (offline)
+        run: .venv/bin/python -c "import sys; sys.path.insert(0,'evals'); from evals.redteam import run_cases; r=run_cases(); bad=[c for c in r if not c['passed']]; print(f'{len(r)-len(bad)}/{len(r)} red-team cases passed'); sys.exit(1 if bad else 0)"

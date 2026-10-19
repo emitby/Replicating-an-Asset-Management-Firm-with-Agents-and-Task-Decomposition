@@ -1,0 +1,10 @@
+anthropic>=1.15
+yfinance>=0.2.50
+pandas>=2.2
+numpy>=1.26
+matplotlib>=3.8
+reportlab>=4.0
+pypdf>=4.0
+pymupdf>=1.24
+pydantic>=2.6
+pytest>=8.0
