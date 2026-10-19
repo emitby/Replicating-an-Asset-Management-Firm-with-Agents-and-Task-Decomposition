@@ -29,7 +29,7 @@ flowchart TB
 | Firm function | Agent / component | Task | Inputs → outputs |
 |---|---|---|---|
 | Data operations | **Data Agent** | Source and certify prices for 6 ETFs and the T-bill rate | Ticker list, start date → `prices.csv`, `data_report.json` |
-| Quant research | **Backtest Agent** | Test 4 MA rules plus walk-forward selection, and 4 momentum lookbacks | Prices → `backtest.json`, `momentum.json`, `returns.csv` |
+| Quant research | **Backtest Agent** | Test 4 MA rules plus walk-forward selection, and 5 momentum lookbacks (50/30/20 in the top three) | Prices → `backtest.json`, `momentum.json`, `returns.csv` |
 | Performance analytics | **Analytics Agent** | Metrics for 3M/1Y/3Y/5Y/inception, a head-to-head since 2011, and findings | Returns → `analytics.json` |
 | Investor relations | **Presentation Agent** | Narrative, chart choice and slide order, the pitch PDF | Analytics, team → `presentation.pdf` |
 | Investment team | **Team Agent** | A fictional PM and 5 analysts with credentials | Strategy description → `team.json` |
@@ -66,6 +66,8 @@ flowchart LR
 - **Limits:** a turn cap per agent, a run-wide token budget, and an append-only conversation history.
 
 ### A real run, agent by agent
+
+*This trace is from momentum v1 (top-1, 4 lookbacks). Momentum v2 (50/30/20 top-three, 5 lookbacks, QQQ benchmark) runs take about 3–4 minutes and $0.65–0.80, with a 29-page deck. The extra time goes to the Presentation Agent's additional slides. The agent structure and flow are identical.*
 
 Run `20261019-165936-eval3`: 183 seconds, **$0.65**, about 348K tokens. 83% of input tokens were served from the prompt cache.
 

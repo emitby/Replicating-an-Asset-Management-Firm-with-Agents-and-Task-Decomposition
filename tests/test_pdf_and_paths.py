@@ -71,6 +71,15 @@ def test_deck_has_disclosures_and_labels(workdir, prices, backtest_result):
     assert len(pages) == 1 + 4 + 2 + 1             # cover, 4 pages, 2 team pages, disclosures
 
 
+def test_no_negative_zero_in_formatting():
+    """Regression: a 1-year return of -0.00004 rendered as '-0.0%'."""
+    from strategy.agents.display import show
+    from strategy.pdf import num, pct
+    assert pct(-0.00004) == "0.0%" and pct(-0.0006) == "-0.1%" and pct(0.0) == "0.0%"
+    assert num(-0.001) == "0.00" and num(-0.006) == "-0.01"
+    assert show(-0.00004, "cagr") == "0.0%" and show(-0.001, "sharpe") == 0.0
+
+
 def test_performance_footer_is_true_for_both_strategies():
     """Regression: the footer said 'net of modeled trading costs' on momentum pages, which are gross."""
     assert "momentum results exclude trading costs" in PERF_FOOTER
@@ -95,8 +104,8 @@ def test_every_code_page_has_its_title(workdir, prices, backtest_result):
     wf, returns = backtest_result
     mom = run_all_momentum(prices, MomentumConfig())
     returns = add_to_returns(returns, mom)
-    comp = {"windows": {w: comparison_window(returns, w, (3, 6, 12, 24)) for w in COMPARISON_WINDOWS},
-            **comparison_extras(returns, (3, 6, 12, 24))}
+    comp = {"windows": {w: comparison_window(returns, w, (1, 3, 6, 12, 24)) for w in COMPARISON_WINDOWS},
+            **comparison_extras(returns, (1, 3, 6, 12, 24))}
     analytics = {"windows": {w: compute_window(returns, w) for w in WINDOWS}, "rolling_1y": rolling_summary(returns),
                  "growth_of_10000": growth_of(returns), "calendar_years": calendar_year_returns(returns)}
     deck = Deck("T", "S")
@@ -105,8 +114,44 @@ def test_every_code_page_has_its_title(workdir, prices, backtest_result):
     deck.add_comparison_table(comp)
     deck.add_momentum_supporting(comp, {f"MOM{L}": r["summary"] for L, r in mom.items()})
     deck.add_supporting_data(analytics)
-    text = " ".join(re.sub(r"\s+", " ", p.extract_text()) for p in PdfReader(str(deck.build(workdir / "c.pdf"))).pages)
+    pdf = deck.build(workdir / "c.pdf")
+    text = " ".join(re.sub(r"\s+", " ", p.extract_text()) for p in PdfReader(str(pdf)).pages)
     assert [t for t in CODE_PAGE_TITLES if t not in text] == []
+    # Regression: with 8 series the calendar table's QQQ column was drawn under the growth table.
+    assert not header_boxes_overlap(pdf, "Momentum Detail: Calendar", "Year", "Growth of $10,000 since 2011")
+
+
+def header_boxes_overlap(pdf, page_marker, left_header_text, right_header_text):
+    """True if two tables' header-row boxes (filled rectangles) overlap horizontally on the same page.
+    Comparing table boxes, not words: a word search missed the real defect (the overlap hid the column's end)."""
+    import pymupdf
+    page = next(p for p in pymupdf.open(str(pdf)) if page_marker in p.get_text())
+    fills = [d["rect"] for d in page.get_drawings() if d.get("fill")]
+
+    def header_box(text):
+        # Only matches inside a filled box are table headers (the page title can contain the same words).
+        boxes = [r for hit in page.search_for(text) for r in fills if r.contains(hit)]
+        return max(boxes, key=lambda r: r.width)
+
+    return header_box(left_header_text).x1 > header_box(right_header_text).x0 + 0.5
+
+
+def test_overlap_check_catches_known_bad_layout(workdir):
+    """The check itself must detect an overlap (two tables deliberately drawn on top of each other)."""
+    from reportlab.pdfgen import canvas as rl_canvas
+    from strategy.pdf import Deck
+    path = workdir / "bad.pdf"
+    c = rl_canvas.Canvas(str(path))
+    c.drawString(40, 800, "Momentum Detail: Calendar")
+    Deck._small_table([["Year", "A", "B", "C", "D"], ["2020", "1", "2", "3", "4"]], [90] * 5).wrapOn(c, 600, 800)
+    t1 = Deck._small_table([["Year", "A", "B", "C", "D"], ["2020", "1", "2", "3", "4"]], [90] * 5)
+    t1.wrapOn(c, 600, 800)
+    t1.drawOn(c, 40, 700)
+    t2 = Deck._small_table([["Growth of $10,000 since 2011", "Value"]], [180, 60])
+    t2.wrapOn(c, 600, 800)
+    t2.drawOn(c, 300, 700)                       # starts inside t1 (t1 spans 40..490)
+    c.save()
+    assert header_boxes_overlap(path, "Momentum Detail: Calendar", "Year", "Growth of $10,000 since 2011")
 
 
 def test_all_charts_render(workdir, prices, backtest_result):
@@ -116,7 +161,7 @@ def test_all_charts_render(workdir, prices, backtest_result):
     wf, returns = backtest_result
     returns = add_to_returns(returns, run_all_momentum(prices, MomentumConfig()))
     analytics = {"windows": {w: compute_window(returns, w) for w in WINDOWS},
-                 "comparison": {"windows": {w: comparison_window(returns, w, (3, 6, 12, 24)) for w in COMPARISON_WINDOWS}}}
+                 "comparison": {"windows": {w: comparison_window(returns, w, (1, 3, 6, 12, 24)) for w in COMPARISON_WINDOWS}}}
     for kind in charts.CHART_KINDS:
         path = charts.render(kind, workdir / "charts", returns, analytics=analytics, history=wf["selection_history"])
         assert path.exists() and path.stat().st_size > 10_000

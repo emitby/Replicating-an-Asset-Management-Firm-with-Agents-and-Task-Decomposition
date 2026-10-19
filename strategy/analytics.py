@@ -91,31 +91,46 @@ MOMENTUM_SERIES_FMT = "MOM{}"
 COMPARISON_MA = "MA Strategy"
 
 
+COMPARISON_BENCHMARKS = ("SPY", "QQQ")
+
+
 def comparison_frame(returns, lookbacks):
-    """Daily returns for the head-to-head: MOM3..MOM24, the MA strategy and SPY, from the momentum start."""
+    """Daily returns for the head-to-head: MOM1..MOM24, the MA strategy, SPY and QQQ, from the momentum start."""
     mom_cols = [MOMENTUM_SERIES_FMT.format(L) for L in lookbacks]
-    df = returns[[*mom_cols, "Strategy", "SPY", "rf"]].dropna(subset=mom_cols)
+    df = returns[[*mom_cols, "Strategy", *COMPARISON_BENCHMARKS, "rf"]].dropna(subset=mom_cols)
     return df.rename(columns={"Strategy": COMPARISON_MA})
 
 
+def comparison_series(lookbacks):
+    return [*(MOMENTUM_SERIES_FMT.format(L) for L in lookbacks), COMPARISON_MA, *COMPARISON_BENCHMARKS]
+
+
+def monthly_weights(returns, name, index):
+    """Month-by-month target weights (universe + CASH) of one momentum sub-strategy."""
+    cols = [c for c in returns.columns if c.startswith(f"w_{name}_")]
+    w = returns.loc[index, cols].rename(columns=lambda c: c[len(f"w_{name}_"):])
+    return w.groupby(w.index.to_period("M")).first()
+
+
 def comparison_window(returns, label, lookbacks):
-    """Metrics for all momentum sub-strategies, the MA strategy and SPY over one window of the common period."""
+    """Metrics for all momentum sub-strategies, the MA strategy, SPY and QQQ over one window."""
     if label not in COMPARISON_WINDOWS:
         raise ValueError(f"Unknown window {label!r}; use one of {list(COMPARISON_WINDOWS)}.")
     months = COMPARISON_WINDOWS[label]
-    df = comparison_frame(returns, lookbacks)
-    names = [*(MOMENTUM_SERIES_FMT.format(L) for L in lookbacks), COMPARISON_MA, "SPY"]
-    out = _window_metrics(window_slice(df, months), label, months, names)
-    sliced = window_slice(returns, months).loc[df.index.min():]
+    df = window_slice(comparison_frame(returns, lookbacks), months)
+    out = _window_metrics(df, label, months, comparison_series(lookbacks))
     out["momentum_activity"] = {}
     for L in lookbacks:
-        hold = sliced[f"hold_MOM{L}"]
-        monthly = hold.groupby(hold.index.to_period("M")).first()
-        out["momentum_activity"][MOMENTUM_SERIES_FMT.format(L)] = {
-            "switches": int((monthly != monthly.shift()).iloc[1:].sum()),
-            "cash_months": int((monthly == "CASH").sum()),
-            "months": int(len(monthly)),
-            "current_holding": str(monthly.iloc[-1]),
+        name = MOMENTUM_SERIES_FMT.format(L)
+        mw = monthly_weights(returns, name, df.index)
+        changed = (mw.diff().abs().sum(axis=1) > 1e-12).iloc[1:]
+        current = mw.iloc[-1]
+        out["momentum_activity"][name] = {
+            "months": int(len(mw)),
+            "rebalances": int(changed.sum()),
+            "full_cash_months": int((mw["CASH"] >= 1 - 1e-12).sum()),
+            "avg_cash_weight": float(mw["CASH"].mean()),
+            "current_weights": {a: float(v) for a, v in current.items() if v > 0},
         }
     return out
 
@@ -127,13 +142,17 @@ def cost_sensitivity(returns, lookbacks, cost_bps):
     out = {}
     for L in lookbacks:
         name = MOMENTUM_SERIES_FMT.format(L)
-        hold = returns.loc[df.index, f"hold_{name}"]
-        trades = (hold != hold.shift()).astype(float)        # first day is True: the initial purchase
-        net = df[name] - trades * cost_bps / 10_000.0
+        cols = [c for c in returns.columns if c.startswith(f"w_{name}_")]
+        w = returns.loc[df.index, cols]
+        assets = [c for c in cols if not c.endswith("_CASH")]
+        # Fraction of the portfolio traded per day (target-to-target); the first day is the initial buy.
+        turnover = w.diff().abs().sum(axis=1) / 2
+        turnover.iloc[0] = w.iloc[0][assets].sum()
+        net = df[name] - turnover * cost_bps / 10_000.0
         years = len(net) / TRADING_DAYS
         gross_cagr = float((1 + df[name]).prod() ** (1 / years) - 1)
         net_cagr = float((1 + net).prod() ** (1 / years) - 1)
-        out[name] = {"trades": int(trades.sum()), "cost_bps": cost_bps,
+        out[name] = {"turnover": float(turnover.sum()), "cost_bps": cost_bps,
                      "cagr_gross": gross_cagr, "cagr_with_costs": net_cagr}
     return out
 

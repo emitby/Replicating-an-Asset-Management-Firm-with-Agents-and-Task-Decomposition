@@ -137,6 +137,8 @@ def run_all(prices, cfg):
     returns = pd.DataFrame({"Strategy": wf["returns"],
                             "SPY": bench["SPY"].loc[oos:],
                             "60/40": bench["60/40"].loc[oos:]}).dropna()
+    if "QQQ" in prices.columns:          # second buy-and-hold benchmark for the momentum comparison
+        returns["QQQ"] = prices["QQQ"].pct_change().reindex(returns.index)
     for n, (_, r) in wf["candidates"].items():
         returns[f"MA{n}"] = r.loc[oos:]
     returns["w_spy"] = wf["weights"].reindex(returns.index)

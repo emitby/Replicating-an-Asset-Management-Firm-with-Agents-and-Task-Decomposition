@@ -128,8 +128,8 @@ def analytics_consistency(run, threshold=1.0):
 
 
 def momentum_reproducible(run, threshold=1.0):
-    """Re-run every momentum sub-strategy from prices.csv: picks and daily returns must match the saved run,
-    and each month's compounded return must equal the held ETF's month-over-month return."""
+    """Re-run every momentum sub-strategy from prices.csv: monthly weights and daily returns must match the
+    saved run, and each month's compounded return must equal Σ weight × the ETF's month-over-month return."""
     from strategy.momentum import monthly_crosscheck, run_all_momentum
     prices, saved, mom = run.csv("prices.csv"), run.csv("returns.csv"), run.json("momentum.json")
     if prices is None or saved is None or mom is None:
@@ -138,8 +138,8 @@ def momentum_reproducible(run, threshold=1.0):
     checks, details = {}, {}
     for L, r in fresh.items():
         name = f"MOM{L}"
-        picks_saved = [h["pick"] for h in mom["sub_strategies"][name]["history"]]
-        picks_fresh = [h["pick"] for h in r["history"]]
+        picks_saved = [h["weights"] for h in mom["sub_strategies"][name]["history"]]
+        picks_fresh = [h["weights"] for h in r["history"]]
         diff = float((r["returns"] - saved[name].dropna()).abs().max())
         cross = monthly_crosscheck(prices, r)
         checks[f"{name}_reproduces"] = picks_saved == picks_fresh and diff < 1e-10 and cross < 1e-10
@@ -313,14 +313,15 @@ def pdf_structure(run, threshold=1.0):
     text = " ".join(pages).lower()
     slides = run.json("slides.json") or []
     checks = {
-        "page_count_14_to_32": 14 <= len(pages) <= 32,
+        "page_count_14_to_36": 14 <= len(pages) <= 36,
         "at_least_5_charts": images >= 5,
         "has_metrics_table": "risk and return by period" in text,
         "mentions_spy_comparison": text.count("spy") >= 10,
         "covers_all_periods": all(w.lower() in text for w in ("3M", "1Y", "3Y", "5Y")),
         "discusses_tradeoffs": any(k in text for k in ("lag", "underperform", "trade-off", "tradeoff")),
-        "agent_slides_10_to_20": 10 <= sum(s["type"] == "slide" for s in slides) <= 20,
-        "covers_all_lookbacks": all(f"{L}-month" in text for L in (3, 6, 12, 24)),
+        "agent_slides_11_to_22": 11 <= sum(s["type"] == "slide" for s in slides) <= 22,
+        "covers_all_lookbacks": all(f"{L}-month" in text for L in MomentumConfig().lookbacks),
+        "qqq_benchmark_shown": text.count("qqq") >= 10,
     }
     return Score("pdf_structure", sum(checks.values()) / len(checks), threshold,
                  {**checks, "pages": len(pages), "images": images})

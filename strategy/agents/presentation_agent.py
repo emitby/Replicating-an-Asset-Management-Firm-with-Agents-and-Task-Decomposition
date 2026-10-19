@@ -1,5 +1,7 @@
 """Presentation Agent: writes the investor pitch and builds the PDF."""
 
+import re
+
 from strategy import charts
 from strategy.agents.display import display
 from strategy.analytics import adverse_windows, momentum_adverse
@@ -9,21 +11,29 @@ from strategy.paths import write_json
 from strategy.pdf import Deck
 
 STANDARD_PAGES = ("metrics_table", "in_sample_comparison", "comparison_table", "momentum_supporting", "team")
-REQUIRED_CHARTS = ("equity_vs_spy", "drawdowns", "momentum_vs_spy", "momentum_holdings")
-MAX_SLIDES, MIN_SLIDES = 20, 10
+REQUIRED_CHARTS = ("equity_vs_spy", "drawdowns", "momentum_vs_benchmarks", "momentum_allocations")
+MAX_SLIDES, MIN_SLIDES = 22, 11
 LOOKBACK_TITLE = "{}-Month"          # each momentum sub-strategy needs a slide whose title contains this
+# A momentum lookback slide: "N-Month" together with "momentum" or "lookback" anywhere in the title
+# (agents have used both "3-Month Momentum" and "3-Month Lookback: Pros and Cons").
+LOOKBACK_TITLE_RE = re.compile(r"(?=.*\b\d+-month\b)(?=.*\b(momentum|lookback)\b)", re.IGNORECASE)
 
 PROMPT = """You are the Presentation Agent. You build an investor presentation that presents two systematic strategies clearly and honestly, and compares them.
 
 1. **MA trend strategy:** holds SPY when SPY is above a moving average and IEF otherwise. The moving average (5, 20, 50 or 200 days) is re-selected each January using only prior data (walk-forward). It is net of modeled trading costs.
-2. **Multi-asset momentum:** four sub-strategies with 3, 6, 12 and 24-month lookbacks. At each month-end, each one ranks SPY, QQQ, TLT, GLD, IWM and IEF by trailing return and holds 100% of the top one for the next month, from January 2011. If all six are negative, it holds cash (0%) for 3 months. It has no trading costs.
+2. **Multi-asset momentum:** five sub-strategies with 1, 3, 6, 12 and 24-month lookbacks.
+   - At each month-end, each one ranks SPY, QQQ, TLT, GLD, IWM and IEF by trailing return and holds 50% / 30% / 20% in the top three for the next month, from January 2011, rebalanced monthly.
+   - A slot whose ETF has a negative trailing return is held in cash (0%). If all six are negative, the whole sub-strategy holds cash for 3 months.
+   - It has no trading costs.
+   - It is benchmarked against both SPY and QQQ buy-and-hold.
 
 The momentum section must include:
-- One slide per lookback, with a title containing "3-Month", "6-Month", "12-Month" or "24-Month", whose bullets start with "Pro:" or "Con:". Give at least one of each per slide.
+- One slide per lookback, with a title containing "1-Month", "3-Month", "6-Month", "12-Month" or "24-Month", whose bullets start with "Pro:" or "Con:". Give at least one of each per slide.
 - Every item in list_metrics.momentum.MOMENTUM_CONS_REQUIRED must appear as a "Con:" on that lookback's slide.
-- A comparison slide covering momentum vs the MA strategy vs SPY since 2011. Mention that momentum excludes trading costs.
-- The charts momentum_vs_spy and momentum_holdings. comparison_returns and momentum_drawdowns are also available.
+- A comparison slide covering momentum vs the MA strategy vs SPY **and QQQ** since 2011. Mention that momentum excludes trading costs.
+- The charts momentum_vs_benchmarks (growth vs SPY and QQQ) and momentum_allocations (monthly weights per lookback). comparison_returns and momentum_drawdowns are also available.
 - The standard pages comparison_table and momentum_supporting.
+- Describe the allocation accurately: three ETFs at 50/30/20, not "the top asset".
 
 Audience: sophisticated investors and allocators. Tone: confident, specific and balanced. A persuasive deck that is trustworthy, not hype.
 
@@ -59,7 +69,9 @@ Rules, enforced by code:
 - Every figure you cite also appears in the code-generated tables or the supporting-data appendix, so readers can trace it.
 - The first slide is an "Executive Summary" with a clear verdict: since 2011, how each momentum lookback and the MA strategy compared with SPY (return, Sharpe, drawdown), and which approach did best on which measure. Include MUST_ACKNOWLEDGE items such as 60/40 beating the MA strategy.
 - Ranges across variants ("X% to Y%") must use the true minimum and maximum of all the variants named. Check every variant before you write a range.
-- A difference of less than 1 percentage point (or 0.05 in a ratio) is a tie. Don't present it as a Pro.
+- A difference of less than 1 percentage point (or 0.05 in a ratio) is a tie. Don't present it as a Pro, and apply this consistently on every slide: never call a gap "more than" on one slide and a "tie" on another. Never group a value into a tie with something it is below by 1 point or more.
+- Claims of a better risk-adjusted profile need support: if a lookback's Sharpe is below SPY's or QQQ's, say so where you discuss its smoother path. If you name a "best" option, say on which measure, and note any benchmark that beats it on that measure.
+- Turnover is a multiple of the portfolio (e.g. "105.9x"). Always write it with the "x".
 - Slide titles must describe what's on the slide. Don't promise a chart that isn't there.
 - The cost sensitivity in list_metrics shows momentum CAGR if charged the MA strategy's per-trade cost. Use it when discussing the cost asymmetry. When comparing a momentum return directly with the MA strategy (which is net of costs), use momentum's "cagr_with_costs" figure, or say explicitly that momentum is before costs.
 - Next-steps requests must not ask for analysis the deck already contains.
@@ -216,7 +228,10 @@ CON_WORDS = {"max_drawdown": ("drawdown",), "sharpe": ("sharpe", "risk-adjusted"
 def momentum_view(comparison, summaries):
     """Exactly what the comparison pages print (traceability by construction)."""
     wins = comparison["windows"]
-    series = ("MOM3", "MOM6", "MOM12", "MOM24", "MA Strategy", "SPY")
+    series = list(wins["S2011"]["series"])                     # MOM1..MOM24, MA Strategy, SPY, QQQ
+    moms = [s for s in series if s.startswith("MOM")]
+    pct = lambda d: {k: f"{v * 100:.1f}%" for k, v in d.items()}
+    act = wins["S2011"]["momentum_activity"]
     return {
         "period": {"start": comparison["start"], "end": comparison["end"]},
         "returns_by_window_3M_total_else_annualized": {
@@ -224,9 +239,11 @@ def momentum_view(comparison, summaries):
                 for w in wins} for s in series},
         "since_2011": {s: {k: display(wins["S2011"]["series"][s].get(k), k) for k in COMPARISON_FIELDS}
                        for s in series},
-        "activity_since_2011": wins["S2011"]["momentum_activity"],
-        "pct_of_months_held": {s: {a: f"{v * 100:.1f}%" for a, v in summaries[s]["pct_months_by_holding"].items()}
-                               for s in series[:4]},
+        "activity_since_2011": {s: {"months": act[s]["months"], "rebalances": act[s]["rebalances"],
+                                    "full_cash_months": act[s]["full_cash_months"],
+                                    "avg_cash_weight": f"{act[s]['avg_cash_weight'] * 100:.1f}%",
+                                    "current_weights": pct(act[s]["current_weights"])} for s in moms},
+        "avg_weight_since_2011": {s: pct(summaries[s]["avg_weight"]) for s in moms},
         "calendar_years": {_year_label(y, comparison["end"]): {k: f"{v * 100:.1f}%" for k, v in row.items()}
                            for y, row in comparison["calendar_years"].items()},
         "growth_of_10000": {k: f"${v:,.0f}" for k, v in comparison["growth_of_10000"].items()},
@@ -234,7 +251,7 @@ def momentum_view(comparison, summaries):
                                    for s, worse in momentum_adverse(comparison).items()},
         "costs_note": "Momentum excludes trading costs; the MA strategy is net of modeled costs.",
         "cost_sensitivity_if_charged_ma_costs": {
-            k: {"trades": v["trades"], "cagr_gross": display(v["cagr_gross"], "cagr"),
+            k: {"turnover_x_portfolio": f"{v['turnover']:.1f}x", "cagr_gross": display(v["cagr_gross"], "cagr"),
                 "cagr_with_costs": display(v["cagr_with_costs"], "cagr")}
             for k, v in comparison["cost_sensitivity"].items()},
     }
@@ -264,10 +281,10 @@ def momentum_section_problems(analytics, slides, lookbacks):
                               for k in ("momentum", "spy")):
         problems.append("The Executive Summary slide must give the verdict across both strategies: how momentum "
                         "and the MA strategy compared with SPY (and each other).")
-    if not any(all(k in " ".join([s["title"], *s["bullets"]]).lower() for k in ("momentum", "spy"))
+    if not any(all(k in " ".join([s["title"], *s["bullets"]]).lower() for k in ("momentum", "spy", "qqq"))
                and any(k in " ".join([s["title"], *s["bullets"]]).lower() for k in ("moving average", "ma strategy", "trend"))
                for s in agent):
-        problems.append("Add a comparison slide covering momentum vs the MA (trend) strategy vs SPY.")
+        problems.append("Add a comparison slide covering momentum vs the MA (trend) strategy vs SPY and QQQ.")
     return problems
 
 
@@ -289,7 +306,10 @@ def unacknowledged_adverse(analytics, slides):
     or the slide title. (A slide-level keyword match let a deck "acknowledge" 60/40 beating the MA
     strategy without ever saying so: 60/40, Sharpe and the window were on one slide but in unrelated bullets.)
     """
-    pairs = [(s["title"].lower(), b.lower()) for s in slides if s["type"] == "slide" for b in s["bullets"]]
+    # Momentum lookback slides ("3-Month Momentum", "12-Month Momentum") are excluded: their titles contain
+    # window synonyms, so their Cons about momentum would otherwise "acknowledge" the MA strategy's weaknesses.
+    pairs = [(s["title"].lower(), b.lower()) for s in slides if s["type"] == "slide"
+             and not LOOKBACK_TITLE_RE.search(s["title"]) for b in s["bullets"]]
     missing = []
     for item in adverse_windows(analytics):
         bench = item["vs"].lower()

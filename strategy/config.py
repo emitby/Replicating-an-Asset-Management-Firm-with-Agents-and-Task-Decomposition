@@ -36,17 +36,24 @@ class StrategyConfig:
 
 @dataclass(frozen=True)
 class MomentumConfig:
-    """Monthly relative momentum: hold the single best trailing performer for the next month.
-    Each lookback is a separate sub-strategy. If all trailing returns are negative, that
-    sub-strategy holds cash at 0% for `cash_months` months, then resumes."""
+    """Monthly relative momentum, top-3 weighted.
+
+    At each month-end, rank the universe by trailing return over the lookback, and hold
+    50% / 30% / 20% in the top three for the next month. A slot whose asset has a negative
+    trailing return is held in cash (0%) instead. If all assets are negative, the whole
+    sub-strategy holds cash for `cash_months` months, then resumes. Each lookback is a
+    separate sub-strategy."""
     universe: tuple = MOMENTUM_UNIVERSE
-    lookbacks: tuple = (3, 6, 12, 24)        # months
+    lookbacks: tuple = (1, 3, 6, 12, 24)     # months
+    slot_weights: tuple = (0.5, 0.3, 0.2)    # top-1, top-2, top-3
     start: str = "2011-01-01"                # first invested month
     cash_months: int = 3
     cost_bps: float = 0.0                    # user decision: no modeled costs (disclosed)
+    benchmarks: tuple = ("SPY", "QQQ")
 
     def constants(self):
-        return {*self.lookbacks, self.cash_months, len(self.universe), 2011}
+        return {*self.lookbacks, self.cash_months, len(self.universe), 2011,
+                *(round(w * 100) for w in self.slot_weights)}
 
     def to_dict(self):
         return asdict(self)

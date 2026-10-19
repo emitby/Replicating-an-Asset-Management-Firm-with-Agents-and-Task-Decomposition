@@ -1,3 +1,32 @@
+# Task 3: Momentum v2, with 50/30/20 top-3 allocation, a 1-month lookback and a QQQ benchmark
+
+Plan: `C:\Users\emitb\.claude\plans\piped-imagining-popcorn.md`. Decisions:
+- **replace** the top-1 rule
+- **per-slot cash** (a negative top-3 asset's slot goes to cash; all six negative → a 3-month lock)
+- full pipeline, then push
+
+- [x] 1. config + momentum.py v2, with tests written first. Caught before running: constant daily weights meant daily rebalancing, so changed to monthly rebalancing with drift.
+- [x] 2. analytics: QQQ in the comparison, turnover-based cost sensitivity, activity from the weight columns
+- [x] 3. agents (5 lookbacks, QQQ), charts (benchmarks, allocations), PDF tables and disclosures
+- [x] 4. scorers, red-team, independent cross-check rewrite
+- [x] 5. live run, cross-check (all 5 lookbacks, 190 months, exact), evals, 3 live trials at 100%
+- [x] 6. subagent visual review and fixes (table overlap, drawdown legibility, turnover unit, tie consistency)
+- [x] 7. docs (all figures checked against the PDF), example PDF, push, CI
+
+## Review (Task 3)
+
+- **Final:** 95 unit tests. 14/14 scorers in 3 of 3 live trials on the final code. 43/43 red-team cases. The independent cross-check passes. The deck is 29 pages.
+- **Result, since 2011:** QQQ beat everything (18.7% CAGR, 0.86 Sharpe). Every momentum lookback had a shallower drawdown than SPY and QQQ (−20.8% to −28.8%). The best momentum lookback was 6-month (11.8% CAGR, 0.79 Sharpe, −20.8% max drawdown).
+- **Defects found:**
+  - daily vs monthly rebalancing semantics
+  - MA balance check loophole via momentum slide titles (twice, as wording varied)
+  - red-team constants
+  - "−0.0%"
+  - **table overlap with 8 series, where the first regression test failed to catch the defect and had to be rewritten**
+  - illegible 8-line drawdown chart
+
+---
+
 # Task 2: Multi-asset momentum (4 lookbacks), added to the pipeline
 
 Plan: `C:\Users\emitb\.claude\plans\piped-imagining-popcorn.md`. Decisions:

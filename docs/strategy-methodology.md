@@ -72,52 +72,49 @@ Also computed: rolling 1-year returns vs SPY (the share of periods beating SPY, 
 - Quality checks: missing values, calendar gaps over 5 days, daily moves over 25% (which suggest a split error), stale price runs, and an implausible T-bill yield.
 - The dataset hash is recorded in each run's manifest for reproducibility.
 
-## Strategy 2: multi-asset momentum (4 sub-strategies)
+## Strategy 2: multi-asset momentum (5 sub-strategies, top-3 weighted)
 
 `strategy/momentum.py`
 
-**Universe:** SPY (US large cap), QQQ (Nasdaq 100), IWM (US small cap), TLT (20+ year Treasuries), IEF (7–10 year Treasuries) and GLD (gold).
+**Universe:** SPY (US large cap), QQQ (Nasdaq 100), IWM (US small cap), TLT (20+ year Treasuries), IEF (7–10 year Treasuries) and GLD (gold). **Benchmarks:** SPY and QQQ buy-and-hold.
 
-For each lookback **L ∈ {3, 6, 12, 24} months**, which is an independent sub-strategy:
+For each lookback **L ∈ {1, 3, 6, 12, 24} months**, which is an independent sub-strategy:
 
 ```
 month-end close  M_a(t) = last adjusted close of calendar month t, for each ETF a
 trailing_a(t)    = M_a(t) / M_a(t − L) − 1
 at each month-end t (first decision Dec 2010, first invested month Jan 2011):
-    if in a cash period:            stay in cash
-    elif max_a trailing_a(t) < 0:   cash for months t+1 … t+3 at a 0% return (re-evaluate at the end of t+3)
-    else:                           hold 100% of argmax_a trailing_a(t) for every trading day of month t+1
+    if in a cash lock:              100% cash
+    elif all trailing_a(t) < 0:     100% cash for months t+1 … t+3 (a lock); re-evaluate at the end of t+3
+    else:                           rank by trailing_a(t) (ties: universe order); hold 50% / 30% / 20% in ranks 1 / 2 / 3
+                                    for month t+1. A slot whose ETF has trailing_a(t) < 0 is held in CASH instead.
 ```
 
-- **No look-ahead.** The decision at month-end t uses prices up to t. The holding starts on the first trading day of t+1. Tested by perturbing future prices.
-- **Daily implementation.** The output is a daily one-hot weight matrix, so the strategy's daily returns are those of the held ETF. All the existing analytics (windows, drawdowns, beta, capture) therefore apply unchanged, and the partial current month is included.
-- **Cash rule, per sub-strategy.** Each lookback triggers independently, based on its own trailing returns.
-- **Costs: none (user decision).** The MA strategy is net of 5 bps per switch, so comparisons favor momentum by its trading costs. The asymmetry is stated in the footer of every performance page and in the disclosures. A **cost-sensitivity table** shows momentum's CAGR if it paid the same 5 bps per trade. The effect is small, about 0.1–0.3% a year.
+- **Monthly rebalancing with drift.** The target weights are bought at the month-end close and drift with prices within the month, so a month's return is exactly Σ w_a × (ETF a's month-over-month return), with cash at 0%. Daily returns follow from that value path, so all the existing analytics (windows, drawdowns, beta, capture) apply unchanged, and the partial current month is included.
+- **No look-ahead.** The decision at month-end t uses prices up to t, and the weights apply from the first trading day of t+1. Tested by perturbing future prices.
+- **Turnover** is half the sum of absolute changes between monthly target weights, cash included, which is the fraction of the portfolio traded. The initial purchase counts as 1.0, and drift-driven rebalancing isn't counted. It's reported as a multiple of the portfolio (e.g. 47.6x since 2011).
+- **Costs: none (user decision).** The MA strategy is net of 5 bps per switch, so comparisons favor momentum by its trading costs. The asymmetry is stated in the footer of every performance page and in the disclosures. The **cost-sensitivity** columns show momentum's CAGR if it paid 5 bps per unit of turnover: 0.1–0.3% a year lower.
 - **Cash at 0%** understates T-bill income in high-rate periods (e.g. 2023–24).
 
 ### Head-to-head comparison (common period)
 
-All four lookbacks, the MA strategy and SPY are compared over **January 2011 to the last completed session**: 3M, 1Y, 3Y, 5Y and "Since 2011", using the same metric definitions as above. Code-enforced deck rules:
+All five lookbacks, the MA strategy, SPY and QQQ are compared over **January 2011 to the last completed session**: 3M, 1Y, 3Y, 5Y and "Since 2011", using the same metric definitions as above. Code-enforced deck rules:
 
 - **One Pro/Con slide per lookback.** Its "Con:" bullets must cover every metric (CAGR, Sharpe, max drawdown) on which that lookback did worse than SPY since 2011.
-- **A comparison slide** covering momentum vs the MA strategy vs SPY.
+- **A comparison slide** covering momentum vs the MA strategy vs SPY **and QQQ**.
 - **An Executive Summary verdict** across both strategies.
-- **60/40 acknowledgement.** If the MA strategy trailed 60/40 since 2007, a slide bullet must say so.
+- **60/40 acknowledgement.** If the MA strategy trailed 60/40 since 2007, a bullet must say so, on a slide that isn't a momentum lookback slide.
 
-### Results from the live run of 2026-10-16, hypothetical (Jan 2011 to Oct 2026)
+Full results: [results.md](results.md). In brief: **QQQ beat everything** (18.7% CAGR, 0.86 Sharpe). Every momentum lookback had a **shallower drawdown than SPY and QQQ** (−20.8% to −28.8%) but a lower return. The **6-month lookback** was the best momentum variant (11.8%, 0.79 Sharpe, in line with SPY's 0.77).
 
-| Since 2011 | CAGR | Volatility | Sharpe | Max DD | Trades/yr* | Cash months | CAGR at 5 bps/trade |
-|---|---|---|---|---|---|---|---|
-| 3-month momentum | 11.2% | 18.0% | 0.59 | −25.9% | 5.1 | 18 | 10.9% |
-| 6-month momentum | 7.6% | 19.0% | 0.40 | −43.8% | 4.5 | 9 | 7.4% |
-| 12-month momentum | 9.0% | 18.4% | 0.48 | −33.3% | 3.0 | 12 | 8.8% |
-| 24-month momentum | 9.1% | 19.6% | 0.46 | −34.2% | 2.0 | 0 | 9.0% |
-| MA trend strategy | 9.3% | 12.1% | 0.67 | −26.4% | | | (already net) |
-| **SPY** | **14.1%** | 17.0% | **0.77** | −33.7% | | | |
+### Version history
 
-\*Switches over about 15.8 years. All four lookbacks held QQQ most often (37–54% of months), followed by GLD and IWM.
+| Version | Rule | Since-2011 result (best lookback) |
+|---|---|---|
+| v1 (commit `6467469`) | 100% in the top asset; lookbacks 3/6/12/24; all-negative cash lock | 3-month: 11.2% CAGR, 0.59 Sharpe, −25.9% max drawdown |
+| **v2 (current)** | **50/30/20 in the top three; per-slot cash; lookbacks 1/3/6/12/24; QQQ benchmark** | **6-month: 11.8% CAGR, 0.79 Sharpe, −20.8% max drawdown** |
 
-**SPY beat every active approach on return and Sharpe since 2011.** The 3-month lookback was the best momentum variant and matched the MA strategy's shallow drawdown. The MA strategy had the best Sharpe of the active approaches, with by far the lowest volatility.
+Diversifying across three holdings cut volatility from about 18–20% (v1) to 12–15% (v2). The 3-, 6- and 24-month Sharpe ratios (0.71, 0.79, 0.62) beat v1's best (0.59). The 12-month (0.58) and the new 1-month (0.52) did not.
 
 ## Known limitations
 

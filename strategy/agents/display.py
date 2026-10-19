@@ -15,9 +15,10 @@ def show(value, key):
     if value is None or value != value:
         return None
     if key in PCT_KEYS:
-        return f"{value * 100:.1f}%"
+        s = f"{value * 100:.1f}"
+        return (s[1:] if s == "-0.0" else s) + "%"           # never "-0.0%", matching pdf.pct
     if key in RATIO_KEYS:
-        return round(value, 2)
+        return round(value, 2) + 0.0                         # + 0.0 turns -0.0 into 0.0
     if isinstance(value, float):
         return round(value, 2)
     return value

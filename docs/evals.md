@@ -97,7 +97,20 @@ A second visual review, plus repeated **live trials**, exposed more gaps. Each w
 | Visual review | Heatmap colors indistinguishable, cash invisible, cover subtitle clipped | Distinct hues, hatched grey cash, wrapped subtitle |
 | Visual review | A wrong range ("36.9% to 63.7%" when one variant was 26.3%), and a 0.4-point tie claimed as a Pro | Prompt rules. **A known limit of code checks:** each number was real, and only the claim about them was wrong. Visual review covers this. |
 
-**Final state, both strategies:** 14/14 scorers pass in 3 of 3 live trials and on the final run. 42/42 red-team cases pass. 90 unit tests pass. The independent cross-check passes.
+### Momentum v2 (50/30/20 top-three, 1-month lookback, QQQ benchmark)
+
+| Found by | Problem | Fix |
+|---|---|---|
+| Own review before running | Constant daily weights would have meant **rebalancing every day**, not monthly as requested | Monthly rebalancing with drift: targets bought at the month-end close. A month's return = Σ w × the ETF's monthly return, which is tested. |
+| Own review | The MA balance check could be satisfied by momentum slides, because "12-Month Momentum" contains a 1Y window synonym | Lookback slides are excluded from MA acknowledgements, with a regression test |
+| Live run | The agent titled slides "3-Month **Lookback**", which slipped past the exclusion pattern for "N-month **momentum**" | The pattern now matches "N-month" with "momentum" or "lookback", and the test covers both titles |
+| Red-team | The red-team number index lacked the momentum constants, so it blocked the legitimate "50%, 30% and 20%" | The red-team uses the same constants as production |
+| Data review | The 1-month lookback's 1Y return showed as **"−0.0%"** | Negative zero is formatted as 0.0%, with a test |
+| Visual review | **The calendar table's QQQ column was drawn under the growth table** once there were 8 series | Columns are sized to the available width, plus an assertion and a geometric test. **The first version of the test searched for words and missed the real defect.** It was rewritten to compare table header boxes, and **confirmed to fail on the bad PDF.** |
+| Visual review | Momentum drawdown chart with 8 lines was illegible | Two panels: lookbacks, and MA/benchmarks |
+| Visual review | Turnover shown without a unit. The tie rule applied inconsistently between slides. "Appeal" claimed despite a lower Sharpe. | Turnover shown as "47.6x". Prompt rules for consistent ties and supported risk-adjusted claims. |
+
+**Final state, momentum v1 (top-1):** 14/14 scorers pass in 3 of 3 live trials and on the final run. 42/42 red-team cases pass. 90 unit tests pass. The independent cross-check passes.
 
 The takeaway is built into this suite: code-graded evals verify what they check, so keep reviewing the rendered output, run several live trials, and turn every new finding into a check.
 

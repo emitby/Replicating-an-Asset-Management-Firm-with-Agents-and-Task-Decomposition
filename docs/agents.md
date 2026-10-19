@@ -10,10 +10,10 @@ Five Claude agents (`claude-opus-5-5`, adaptive thinking, server-side refusal fa
 | Agent | Effort | Tools | Preconditions enforced in code | Artifact |
 |---|---|---|---|---|
 | **Data** | low | `fetch_prices`, `check_data_quality`, `save_dataset` | Ticker allowlist (SPY, QQQ, TLT, GLD, IWM, IEF, ^IRX) and date range. Quality check before saving. Enough history for 24-month lookbacks before 2011. | `prices.csv`, `data_report.json` |
-| **Backtest** | low | `run_ma_backtest`, `run_walk_forward`, `compare_candidates`, `run_momentum`, `save_backtest` | All 4 MAs, the walk-forward, the comparison and **all 4 momentum lookbacks** before saving. Parameters fixed by config. | `backtest.json`, `momentum.json`, `returns.csv` |
-| **Analytics** | medium | `compute_metrics`, `rolling_analysis`, `compute_comparison`, `save_analytics` | All 5 MA windows, the rolling analysis and all 5 **comparison windows** (3M/1Y/3Y/5Y/since 2011) before saving. 5–9 findings, at least 2 on momentum, **every number verified**. | `analytics.json` |
+| **Backtest** | low | `run_ma_backtest`, `run_walk_forward`, `compare_candidates`, `run_momentum`, `save_backtest` | All 4 MAs, the walk-forward, the comparison and **all 5 momentum lookbacks** (50/30/20 top-three) before saving. Parameters fixed by config. | `backtest.json`, `momentum.json`, `returns.csv` |
+| **Analytics** | medium | `compute_metrics`, `rolling_analysis`, `compute_comparison`, `save_analytics` | All 5 MA windows, the rolling analysis and all 5 **comparison windows** (3M/1Y/3Y/5Y/since 2011) before saving. 5–9 findings, at least 2 on momentum and 1 vs QQQ, **every number verified**. | `analytics.json` |
 | **Team** | low | `submit_team` | Schema, 1 PM + 5 analysts, certification allowlist, fictional employers, no famous names | `team.json` |
-| **Presentation** | medium | `list_metrics`, `get_team`, `render_chart`, `add_slide`, `add_standard_page`, `build_pdf` | Each slide checked by guardrails when added. 10–20 slides. Required charts and 5 standard pages. **A Pro/Con slide per lookback covering its weaknesses vs SPY, a comparison slide, an Executive Summary verdict**, and MA/60/40 acknowledgements, all before the build. | `presentation.pdf`, `slides.json`, `charts/` |
+| **Presentation** | medium | `list_metrics`, `get_team`, `render_chart`, `add_slide`, `add_standard_page`, `build_pdf` | Each slide checked by guardrails when added. 11–22 slides. Required charts and 5 standard pages. **A Pro/Con slide per lookback (5) covering its weaknesses vs SPY, a comparison slide vs SPY and QQQ, an Executive Summary verdict**, and MA/60/40 acknowledgements, all before the build. | `presentation.pdf`, `slides.json`, `charts/` |
 
 ## Why every agent uses an LLM, and what it adds
 

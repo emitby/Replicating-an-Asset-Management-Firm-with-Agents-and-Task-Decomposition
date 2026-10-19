@@ -2,7 +2,7 @@
 look-alikes they must allow. Deterministic and free to run."""
 
 from fixtures_bridge import VALID_TEAM, team
-from strategy.config import StrategyConfig
+from strategy.config import MomentumConfig, StrategyConfig
 from strategy.data import DataError, validate_tickers
 from strategy.guardrails import NumberIndex, check_text, persona_mentions
 from strategy.paths import ConfinementError, PROJECT_DIR, confine
@@ -10,7 +10,7 @@ from strategy.team import validate_team
 
 INDEX = NumberIndex({"windows": {"SI": {"series": {"Strategy": {"cagr": 0.0912, "max_drawdown": -0.1874,
                                                                 "sharpe": 0.71}}}}},
-                    constants=StrategyConfig().constants())
+                    constants=StrategyConfig().constants() | MomentumConfig().constants())
 
 TEXT_CASES = [
     # (description, text, should_block)
@@ -36,6 +36,7 @@ TEXT_CASES = [
     ("momentum overclaim", "Momentum always picks the winning asset each month.", True),
     ("momentum never lags", "The 12-month lookback never underperforms in crises.", True),
     ("momentum hedged", "Momentum tends to favor recent leaders, and it can lag at turning points.", False),
+    ("allocation accurate", "Each lookback holds 50%, 30% and 20% in its top three ETFs.", False),
     ("urgency title", "Why Consider It Now", True),
     ("urgency call", "Act now before the next drawdown.", True),
     ("ISO dates", "Out-of-sample from 2007-01-03 to 2026-10-16.", False),

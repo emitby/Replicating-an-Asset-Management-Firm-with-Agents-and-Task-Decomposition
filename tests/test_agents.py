@@ -40,7 +40,7 @@ def test_backtest_agent_must_run_every_candidate(workdir, prices):
 def full_backtest_script():
     return [
         response(*[tool_use(f"m{n}", "run_ma_backtest", ma_days=n) for n in (5, 20, 50, 200)],
-                 *[tool_use(f"mom{L}", "run_momentum", lookback_months=L) for L in (3, 6, 12, 24)],
+                 *[tool_use(f"mom{L}", "run_momentum", lookback_months=L) for L in (1, 3, 6, 12, 24)],
                  tool_use("wf", "run_walk_forward"), stop="tool_use"),
         response(tool_use("c", "compare_candidates"), stop="tool_use"),
         response(tool_use("s", "save_backtest", methodology_summary="Walk-forward selection."), stop="tool_use"),
@@ -58,7 +58,7 @@ def test_backtest_then_analytics_findings_are_number_checked(workdir, prices):
     sharpe = round(ctx.backtest["candidates_in_sample"]["MA200"]["sharpe"], 2)  # any real number
     good = ["Finding one is qualitative.", "Drawdowns were smaller in stress periods.",
             f"The 200-day rule had an in-sample Sharpe of {sharpe:.2f}.", "It lagged in strong rallies.",
-            "Momentum lookbacks differ in how often they switch.", "Longer momentum lookbacks hold positions longer."]
+            "Momentum lookbacks differ in how often they rebalance vs QQQ.", "Longer momentum lookbacks hold positions longer."]
     no_momentum = good[:4] + ["Another general finding."]
     ctx.client = FakeClaude(
         response(*[tool_use(f"w{w}", "compute_metrics", window=w) for w in WINDOWS],
@@ -100,7 +100,7 @@ def ready_ctx(workdir, prices):
         response(*[tool_use(f"w{w}", "compute_metrics", window=w) for w in WINDOWS],
                  *[tool_use(f"c{w}", "compute_comparison", window=w) for w in COMPARISON_WINDOWS],
                  tool_use("r", "rolling_analysis"), stop="tool_use"),
-        response(tool_use("s", "save_analytics", findings=["A.", "B.", "C.", "Momentum one.", "Momentum two."]),
+        response(tool_use("s", "save_analytics", findings=["A.", "B.", "C.", "Momentum one vs QQQ.", "Momentum two."]),
                  stop="tool_use"),
         response(text("ok")),
     )
@@ -123,14 +123,14 @@ def test_presentation_agent_guardrails_and_pdf(ready_ctx):
     from strategy.agents.presentation_agent import CON_WORDS
     from strategy.analytics import momentum_adverse
     mom_slides = []
-    for L in (3, 6, 12, 24):
+    for L in (1, 3, 6, 12, 24):
         cons = [f"Con: weaker {CON_WORDS[m][0]} than SPY since 2011." for m in momentum_adverse(ctx.analytics["comparison"])[f"MOM{L}"]]
         mom_slides.append(tool_use(f"mom{L}", "add_slide", title=f"{L}-Month Momentum: Pros and Cons",
                                    bullets=["Pro: Rotates into the strongest asset.", *(cons or ["Con: Concentrated in one ETF."])]))
     ctx.client = FakeClaude(
         response(tool_use("l", "list_metrics"),
                  *[tool_use(f"c{k}", "render_chart", kind=k)
-                   for k in ("equity_vs_spy", "drawdowns", "momentum_vs_spy", "momentum_holdings")], stop="tool_use"),
+                   for k in ("equity_vs_spy", "drawdowns", "momentum_vs_benchmarks", "momentum_allocations")], stop="tool_use"),
         # violation: invented number and promissory language
         response(tool_use("bad", "add_slide", title="Why invest", bullets=["Guaranteed 99.9% upside."]), stop="tool_use"),
         response(tool_use("p1", "add_slide", title="Performance vs SPY", bullets=["Growth of $10,000 shown."],
@@ -140,12 +140,12 @@ def test_presentation_agent_guardrails_and_pdf(ready_ctx):
                  *slides, stop="tool_use"),
         response(tool_use("early", "build_pdf"), stop="tool_use"),
         response(tool_use("mv", "add_slide", title="Momentum Since January", bullets=["Six-ETF rotation."],
-                          chart="momentum_vs_spy"),
+                          chart="momentum_vs_benchmarks"),
                  tool_use("mh", "add_slide", title="What Momentum Held", bullets=["Holdings by lookback."],
-                          chart="momentum_holdings"),
+                          chart="momentum_allocations"),
                  *mom_slides,
-                 tool_use("cmp", "add_slide", title="Momentum vs MA Strategy vs SPY",
-                          bullets=["Compares momentum with the MA strategy and SPY; momentum excludes costs."]),
+                 tool_use("cmp", "add_slide", title="Momentum vs MA Strategy vs SPY and QQQ",
+                          bullets=["Compares momentum with the MA strategy, SPY and QQQ; momentum excludes costs."]),
                  tool_use("sum", "add_slide", title="Executive Summary",
                           bullets=["Verdict: how momentum and the MA strategy compared with SPY."]),
                  *[tool_use(f"sp{p}", "add_standard_page", page=p)
@@ -165,7 +165,7 @@ def test_presentation_agent_guardrails_and_pdf(ready_ctx):
     bad = tool_results(ctx.client, 2)[0]
     assert bad["is_error"] and "99.9%" in bad["content"] and "guarantee" in bad["content"].lower()
     early = tool_results(ctx.client, 4)[0]
-    assert early["is_error"] and "at least 10 slides" in early["content"]
+    assert early["is_error"] and "at least 11 slides" in early["content"]
     assert ctx.path("presentation.pdf").exists()
     perf = {s["title"]: s["performance"] for s in ctx.slides if s["type"] == "slide"}
     # Disclosure is decided by code: charts or any digit -> performance footer.
@@ -196,7 +196,7 @@ def test_momentum_section_requirements(ready_ctx):
     from strategy.analytics import momentum_adverse
     a = ready_ctx.analytics
     slide = lambda title, *b: {"type": "slide", "title": title, "bullets": list(b), "chart": None}
-    problems = momentum_section_problems(a, [slide("3-Month Momentum", "Pro: fast.")], (3, 6, 12, 24))
+    problems = momentum_section_problems(a, [slide("3-Month Momentum", "Pro: fast.")], (1, 3, 6, 12, 24))
     assert any("6-Month" in p for p in problems) and any("Pro:" in p for p in problems)
     assert any("comparison slide" in p for p in problems)
 
@@ -204,17 +204,33 @@ def test_momentum_section_requirements(ready_ctx):
     complete = [slide(f"{L}-Month Momentum", "Pro: adapts.",
                       *[f"Con: weaker {'drawdown' if m == 'max_drawdown' else m} than SPY." for m in adverse[f"MOM{L}"]],
                       "Con: concentrated.")
-                for L in (3, 6, 12, 24)]
-    complete.append(slide("Momentum vs MA Strategy vs SPY", "Momentum compared with the trend strategy and SPY."))
-    assert any("Executive Summary" in p for p in momentum_section_problems(a, complete, (3, 6, 12, 24)))
+                for L in (1, 3, 6, 12, 24)]
+    complete.append(slide("Momentum vs MA Strategy vs SPY and QQQ", "Momentum compared with the trend strategy, SPY and QQQ."))
+    assert any("Executive Summary" in p for p in momentum_section_problems(a, complete, (1, 3, 6, 12, 24)))
     complete.append(slide("Executive Summary", "Verdict: momentum vs the MA strategy vs SPY since 2011."))
-    assert momentum_section_problems(a, complete, (3, 6, 12, 24)) == []
+    assert momentum_section_problems(a, complete, (1, 3, 6, 12, 24)) == []
     # Dropping a required Con is caught.
-    lagging = next((L for L in (3, 6, 12, 24) if adverse[f"MOM{L}"]), None)
+    lagging = next((L for L in (1, 3, 6, 12, 24) if adverse[f"MOM{L}"]), None)
     if lagging:
-        idx = (3, 6, 12, 24).index(lagging)
+        idx = (1, 3, 6, 12, 24).index(lagging)
         complete[idx] = slide(f"{lagging}-Month Momentum", "Pro: adapts.", "Con: concentrated.")
-        assert any(f"{lagging}-month" in p for p in momentum_section_problems(a, complete, (3, 6, 12, 24)))
+        assert any(f"{lagging}-month" in p for p in momentum_section_problems(a, complete, (1, 3, 6, 12, 24)))
+
+
+def test_momentum_slides_cannot_acknowledge_ma_weaknesses():
+    """Regression: '12-Month Momentum' + 'Con: lower Sharpe than SPY' must not count as acknowledging the
+    MA strategy's 1-year Sharpe shortfall (the title contains a 1Y window synonym)."""
+    from strategy.agents.presentation_agent import unacknowledged_adverse
+    a = {"windows": {"1Y": {"series": {"Strategy": {"max_drawdown": -0.05, "sharpe": 0.7},
+                                       "SPY": {"max_drawdown": -0.09, "sharpe": 1.0}}}}}
+    mom = {"type": "slide", "title": "12-Month Momentum: Pros and Cons", "bullets": ["Con: lower Sharpe than SPY."]}
+    assert unacknowledged_adverse(a, [mom]) == ["1Y vs SPY sharpe"]
+    lookback = {"type": "slide", "title": "12-Month Lookback: Pros and Cons", "bullets": ["Con: lower Sharpe than SPY."]}
+    assert unacknowledged_adverse(a, [lookback]) == ["1Y vs SPY sharpe"]      # live runs used this title style
+    ma = {"type": "slide", "title": "When the MA Strategy Lags", "bullets": ["1Y: lower Sharpe than SPY (0.70 vs 1.00)."]}
+    assert unacknowledged_adverse(a, [mom, lookback, ma]) == []
+    period = {"type": "slide", "title": "MA Strategy Performance by Period: 3M, 1Y", "bullets": ["1Y Sharpe below SPY."]}
+    assert unacknowledged_adverse(a, [period]) == []                          # MA slides still count
 
 
 def test_turn_limit_and_budget(workdir):
