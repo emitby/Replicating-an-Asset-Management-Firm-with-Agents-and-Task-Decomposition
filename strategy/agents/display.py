@@ -18,7 +18,9 @@ def show(value, key):
         s = f"{value * 100:.1f}"
         return (s[1:] if s == "-0.0" else s) + "%"           # never "-0.0%", matching pdf.pct
     if key in RATIO_KEYS:
-        return round(value, 2) + 0.0                         # + 0.0 turns -0.0 into 0.0
+        # A string with exactly 2 decimals: as a float, 1.10 became "1.1" on a slide (reviewer catch).
+        s = f"{value:.2f}"
+        return s[1:] if s == "-0.00" else s
     if isinstance(value, float):
         return round(value, 2)
     return value

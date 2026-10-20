@@ -126,7 +126,8 @@ def test_presentation_agent_guardrails_and_pdf(ready_ctx):
     for L in (1, 3, 6, 12, 24):
         cons = [f"Con: weaker {CON_WORDS[m][0]} than SPY since 2011." for m in momentum_adverse(ctx.analytics["comparison"])[f"MOM{L}"]]
         mom_slides.append(tool_use(f"mom{L}", "add_slide", title=f"{L}-Month Momentum: Pros and Cons",
-                                   bullets=["Pro: Rotates into the strongest asset.", *(cons or ["Con: Concentrated in one ETF."])]))
+                                   bullets=["Pro: Rotates into the strongest asset.", *cons,
+                                            "Con: always fully invested, no defensive exit."]))
     ctx.client = FakeClaude(
         response(tool_use("l", "list_metrics"),
                  *[tool_use(f"c{k}", "render_chart", kind=k)
@@ -203,7 +204,7 @@ def test_momentum_section_requirements(ready_ctx):
     adverse = momentum_adverse(a["comparison"])
     complete = [slide(f"{L}-Month Momentum", "Pro: adapts.",
                       *[f"Con: weaker {'drawdown' if m == 'max_drawdown' else m} than SPY." for m in adverse[f"MOM{L}"]],
-                      "Con: concentrated.")
+                      "Con: concentrated; always fully invested with no defensive exit.")
                 for L in (1, 3, 6, 12, 24)]
     complete.append(slide("Momentum vs MA Strategy vs SPY and QQQ", "Momentum compared with the trend strategy, SPY and QQQ."))
     assert any("Executive Summary" in p for p in momentum_section_problems(a, complete, (1, 3, 6, 12, 24)))
@@ -213,8 +214,63 @@ def test_momentum_section_requirements(ready_ctx):
     lagging = next((L for L in (1, 3, 6, 12, 24) if adverse[f"MOM{L}"]), None)
     if lagging:
         idx = (1, 3, 6, 12, 24).index(lagging)
-        complete[idx] = slide(f"{lagging}-Month Momentum", "Pro: adapts.", "Con: concentrated.")
+        complete[idx] = slide(f"{lagging}-Month Momentum", "Pro: adapts.", "Con: always fully invested.")
         assert any(f"{lagging}-month" in p for p in momentum_section_problems(a, complete, (1, 3, 6, 12, 24)))
+
+
+def test_no_cash_language_when_always_invested(ready_ctx):
+    """v3: momentum is always fully invested, so no momentum slide may describe cash (accurate negations are fine)."""
+    from strategy.agents.presentation_agent import momentum_section_problems
+    slide = lambda title, *b: {"type": "slide", "title": title, "bullets": list(b), "chart": None}
+    bad = [slide("3-Month Momentum: Pros and Cons", "Con: it moves to cash after losses.")]
+    ok = [slide("3-Month Momentum: Pros and Cons", "Pro: always fully invested, never in cash.")]
+    flag = lambda slides, cr: [p for p in momentum_section_problems(ready_ctx.analytics, slides, (3,), cash_rules=cr)
+                               if "mentions cash" in p]
+    assert flag(bad, False) and not flag(ok, False)
+    assert not flag(bad, True)                      # with cash rules (v2), describing cash is legitimate
+    # Regression: this accurate sentence from a live run was wrongly rejected, and the agent couldn't recover.
+    from strategy.agents.presentation_agent import CASH_WORD_RE
+    live = "Always fully invested, even when trailing returns are negative; it never holds cash and has no defensive mechanism."
+    assert not CASH_WORD_RE.search(live)
+    assert not CASH_WORD_RE.search("It does not move to cash.") and not CASH_WORD_RE.search("without moving into cash")
+    assert CASH_WORD_RE.search("It rotates into cash after losses.")
+    assert CASH_WORD_RE.search("No leverage is used; it moves to cash in sell-offs.")   # negation elsewhere
+
+
+def test_revise_slide_replaces_in_place_with_same_guardrails(ready_ctx):
+    """Regression: with append-only slides, a build_pdf rejection about an earlier slide was unrecoverable."""
+    from strategy.agents.presentation_agent import build as build_presentation
+    ctx = ready_ctx
+    tools = build_presentation(ctx).tools
+    tools["add_slide"].handler("Overview", ["First version."])
+    tools["add_slide"].handler("Next Steps", ["Request the methodology."])
+    out = tools["revise_slide"].handler("Overview", "Overview (revised)", ["Second version."])
+    assert out["position"] == 2 and [s["title"] for s in ctx.slides][:2] == ["Overview (revised)", "Next Steps"]
+    from strategy.agents.runtime import ToolError
+    with pytest.raises(ToolError, match="guardrails"):
+        tools["revise_slide"].handler("Overview (revised)", "Overview", ["Returns are guaranteed."])
+    with pytest.raises(ToolError, match="No slide titled"):
+        tools["revise_slide"].handler("Missing", "X", ["Y."])
+
+
+def test_always_invested_momentum_not_pitched_as_defensive(ready_ctx):
+    """Regression (v3 review): decks said both strategies 'aim to reduce drawdowns' although momentum has no
+    defensive rule, and some lookback slides omitted the no-protection con."""
+    from strategy.agents.presentation_agent import DEFENSIVE_CLAIM_RE, momentum_section_problems
+    slide = lambda title, *b: {"type": "slide", "title": title, "bullets": list(b), "chart": None}
+    probs = lambda slides: momentum_section_problems(ready_ctx.analytics, slides, (3,), cash_rules=False)
+    claims = [slide("Executive Summary", "Both are tactical allocations aimed at shallower drawdowns."),
+              slide("Why Momentum", "The case for momentum rests on drawdown.")]
+    assert sum("design aim" in p for p in probs(claims)) == 2
+    ma_only = [slide("How the MA Strategy Works", "The MA strategy aims to reduce drawdowns by switching to IEF.")]
+    assert not any("design aim" in p for p in probs(ma_only))
+    observed = [slide("Momentum Drawdowns", "Momentum's 3-month drawdown was shallower than SPY's (observed).")]
+    assert not any("design aim" in p for p in probs(observed))
+    no_con = [slide("3-Month Momentum: Pros and Cons", "Pro: strong.", "Con: trails SPY.")]
+    assert any("no defensive" in p for p in probs(no_con))
+    with_con = [slide("3-Month Momentum: Pros and Cons", "Pro: strong.", "Con: always fully invested, no defensive exit.")]
+    assert not any("no defensive" in p for p in probs(with_con))
+    assert DEFENSIVE_CLAIM_RE.search("Both strategies aim to reduce drawdowns systematically.")
 
 
 def test_momentum_slides_cannot_acknowledge_ma_weaknesses():

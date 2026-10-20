@@ -39,17 +39,20 @@ class MomentumConfig:
     """Monthly relative momentum, top-3 weighted.
 
     At each month-end, rank the universe by trailing return over the lookback, and hold
-    50% / 30% / 20% in the top three for the next month. A slot whose asset has a negative
-    trailing return is held in cash (0%) instead. If all assets are negative, the whole
-    sub-strategy holds cash for `cash_months` months, then resumes. Each lookback is a
-    separate sub-strategy."""
+    50% / 30% / 20% in the top three for the next month: always fully invested (v3).
+    With cash_rules=True (v2), a slot whose asset has a negative trailing return is held
+    in cash instead, and if all assets are negative the sub-strategy holds cash for
+    `cash_months` months. Each lookback is a separate sub-strategy."""
     universe: tuple = MOMENTUM_UNIVERSE
     lookbacks: tuple = (1, 3, 6, 12, 24)     # months
     slot_weights: tuple = (0.5, 0.3, 0.2)    # top-1, top-2, top-3
     start: str = "2011-01-01"                # first invested month
-    cash_months: int = 3
+    cash_months: int = 3                     # used only when cash_rules is True
     cost_bps: float = 0.0                    # user decision: no modeled costs (disclosed)
     benchmarks: tuple = ("SPY", "QQQ")
+    # User decision (v3): "don't send allocations to zero for any reason". Always fully invested at
+    # 50/30/20 in the top three, even when trailing returns are negative. True reproduces v2.
+    cash_rules: bool = False
 
     def constants(self):
         return {*self.lookbacks, self.cash_months, len(self.universe), 2011,

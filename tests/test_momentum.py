@@ -60,7 +60,7 @@ def test_per_slot_cash(negatives, expected):
     for a in negatives:
         growth[a] = -0.005 if a == "IWM" else -0.001
     p = staircase({a: const(g) for a, g in growth.items()})
-    r = run_momentum(p, 3, UNIVERSE, start="2009-01-01")
+    r = run_momentum(p, 3, UNIVERSE, start="2009-01-01", cash_rules=True)
     h = month(r, "2009-06")
     assert h["weights"] == expected
     assert h["reason"] == "top 3 weighted; negative slots in cash"
@@ -74,7 +74,7 @@ def test_all_negative_locks_cash_three_months_then_resumes():
             return 0.03 if asset == "SPY" else 0.0
         return g
     p = staircase({a: down_then_spy_up(a) for a in UNIVERSE})
-    r = run_momentum(p, 3, UNIVERSE, start="2010-06-01", cash_months=3)
+    r = run_momentum(p, 3, UNIVERSE, start="2010-06-01", cash_months=3, cash_rules=True)
     assert month(r, "2011-02")["weights"].get("CASH", 0) < 1          # not yet all negative
     for m in ("2011-03", "2011-04", "2011-05"):
         assert month(r, m)["weights"] == {"CASH": 1.0}
@@ -84,6 +84,34 @@ def test_all_negative_locks_cash_three_months_then_resumes():
     june = month(r, "2011-06")["weights"]
     assert june["SPY"] == 0.5 and june["CASH"] == pytest.approx(0.5)
     assert (r["returns"].loc["2011-03-01":"2011-05-31"] == 0).all()
+
+
+def test_v3_negative_picks_still_held():
+    """v3 (default): 'don't send allocations to zero for any reason' -- a negative top-3 asset keeps its slot."""
+    growth = {"QQQ": 0.03, "GLD": 0.02, "IWM": -0.005, "SPY": -0.02, "TLT": -0.03, "IEF": -0.04}
+    p = staircase({a: const(g) for a, g in growth.items()})
+    r = run_momentum(p, 3, UNIVERSE, start="2009-01-01")
+    h = month(r, "2009-06")
+    assert h["weights"] == {"QQQ": 0.5, "GLD": 0.3, "IWM": 0.2}
+    assert h["reason"] == "top 3 weighted (always invested)"
+
+
+def test_v3_all_negative_still_fully_invested():
+    """Even when all six trailing returns are negative, the top three are held at 50/30/20 (no cash lock)."""
+    growth = {"QQQ": -0.01, "GLD": -0.02, "IWM": -0.03, "SPY": -0.04, "TLT": -0.05, "IEF": -0.06}
+    p = staircase({a: const(g) for a, g in growth.items()})
+    r = run_momentum(p, 3, UNIVERSE, start="2009-01-01")
+    for h in r["history"][:12]:
+        assert h["weights"] == {"QQQ": 0.5, "GLD": 0.3, "IWM": 0.2}
+    assert (r["weights"]["CASH"] == 0).all()
+    assert r["summary"]["full_cash_months"] == 0 and r["summary"]["partial_cash_months"] == 0
+
+
+def test_v3_default_never_holds_cash(prices):
+    for L, r in run_all_momentum(prices, MomentumConfig()).items():
+        assert (r["weights"]["CASH"] == 0).all(), L
+        np.testing.assert_allclose(r["weights"].sum(axis=1), 1.0)
+        assert all(len(h["weights"]) == 3 and "CASH" not in h["weights"] for h in r["history"]), L
 
 
 def test_one_month_lookback_supported(prices):

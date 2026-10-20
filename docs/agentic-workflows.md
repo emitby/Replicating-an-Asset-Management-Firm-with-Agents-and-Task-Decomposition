@@ -67,7 +67,7 @@ flowchart LR
 
 ### A real run, agent by agent
 
-*This trace is from momentum v1 (top-1, 4 lookbacks). Momentum v2 (50/30/20 top-three, 5 lookbacks, QQQ benchmark) runs take about 3–4 minutes and $0.65–0.80, with a 29-page deck. The extra time goes to the Presentation Agent's additional slides. The agent structure and flow are identical.*
+*This trace is from momentum v1 (top-1, 4 lookbacks). Momentum v2 (50/30/20 top-three, 5 lookbacks, QQQ benchmark) runs took about 3–4 minutes and $0.65–0.80. Momentum v3 (always fully invested) runs take about 4–5 minutes and about $1: the Presentation Agent does more self-correction under the v3 honesty checks, often through `revise_slide`. Per-tool token counts for a v3 run are in [tools-and-tokens.md](tools-and-tokens.md). The agent structure and flow are identical.*
 
 Run `20261019-165936-eval3`: 183 seconds, **$0.65**, about 348K tokens. 83% of input tokens were served from the prompt cache.
 
@@ -187,8 +187,8 @@ What each step caught (details in [evals.md](evals.md)):
 
 | | Value |
 |---|---|
-| Live run, both strategies | 100–195 s, **$0.31–0.77** |
-| Biggest consumer | Presentation Agent, about 55–60% of cost (15 turns, 18 slides) |
-| Prompt caching | About 80%+ of input tokens read from cache |
-| Live eval, 3 trials | About 9 minutes, about $2 |
+| Live run, both strategies (momentum v3) | About 260 s, **about $1.02** (earlier versions: 100–195 s, $0.31–0.80) |
+| Biggest consumer | Presentation Agent, about 63% of cost in v3 (14 turns). See [tools-and-tokens.md](tools-and-tokens.md). |
+| Prompt caching | Only 64 of about 440K input tokens were uncached in the v3 profile run; the rest were cache writes and reads |
+| Live eval, 3 trials | About 12 minutes, about $2.60 (v3) |
 | Unit tests, red-team, independent cross-check | Free, no API calls |

@@ -1,3 +1,28 @@
+# Task 4: Momentum v3, always fully invested (no cash, ever)
+
+Plan: `C:\Users\emitb\.claude\plans\piped-imagining-popcorn.md`. User: "don't send allocations to zero for any reason". Both cash rules are removed. 50/30/20 in the top three every month.
+
+- [x] 1. `cash_rules` switch (default off) in config and momentum.py, with tests first (negative picks still held, all-negative still invested, CASH always 0)
+- [x] 2. prompts, PDF text and disclosures without cash language; new check that no slide describes momentum cash (proven to fail on the v2 deck)
+- [x] 3. cross-check supports both modes; live run, cross-check, evals, 3 trials
+- [x] 4. visual review, docs (v1/v2/v3 table), figures vs PDF, push, CI
+- [x] 5. (user, mid-task) detailed docs: harness.md, evals.md, guardrails.md (guardrail engineering: harms, enforcement, limits), tools-and-tokens.md with exact per-tool token counts and a chart (docs/images/tool-tokens.png)
+
+## Review (Task 4)
+
+- **Final:** 101 unit tests. 14/14 scorers and 43/43 red-team cases on the verified run (20261019-224835, $1.02, 258 s). The independent cross-check passes (5 lookbacks × 190 months, CASH always 0). Three live trials on the final code passed **14/14 scorers in 3 of 3** (each $0.82–0.92, 229–255 s), and the independent cross-check passed on all three.
+- **Result, since 2011:** removing cash raised CAGR for 4 of 5 lookbacks (1-month: 7.3% → 10.9%) but deepened drawdowns (1-month: −22.8% → −32.9%). The best lookback is now 3-month (11.9% CAGR, 0.77 Sharpe, equal to SPY's). QQQ still beat everything.
+- **Defects found:**
+  - the deck pitched always-invested momentum as aimed at shallower drawdowns
+  - no no-defense Cons
+  - a tie inside a Pro
+  - "1.1"
+  - a duplicated ETF list
+  - missing x labels
+  - **a false-positive cash check plus no revise tool failed a live run.** Fixed with negation-aware matching and `revise_slide`.
+
+---
+
 # Task 3: Momentum v2, with 50/30/20 top-3 allocation, a 1-month lookback and a QQQ benchmark
 
 Plan: `C:\Users\emitb\.claude\plans\piped-imagining-popcorn.md`. Decisions:

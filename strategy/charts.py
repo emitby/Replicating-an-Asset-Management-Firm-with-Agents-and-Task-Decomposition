@@ -202,7 +202,8 @@ def _drawdowns_chart(returns):
         _style(ax, f"{title}: drawdown from peak since {df.index.min():%b %Y}")
         ax.title.set_fontsize(11)
         ax.legend(frameon=False, loc="lower left", ncols=len(group), fontsize=8)
-    fig.subplots_adjust(hspace=0.28, left=0.08, right=0.98, top=0.94, bottom=0.06)
+        ax.tick_params(labelbottom=True)          # shared x-axis: keep year labels on the top panel too
+    fig.subplots_adjust(hspace=0.35, left=0.08, right=0.98, top=0.94, bottom=0.06)
     return fig
 
 
@@ -232,10 +233,12 @@ def _allocations_chart(returns):
     months = mw.index
     ticks = [i for i, m in enumerate(months) if m.month == 1]
     axes[-1].set_xticks(ticks, [str(months[i].year) for i in ticks], fontsize=8, rotation=45)
-    axes[0].set_title("Monthly weights by lookback (50/30/20 in the top three; hatched grey = cash)",
+    any_cash = any(f"w_{s}_CASH" in df.columns and (df[f"w_{s}_CASH"] > 0).any() for s in moms)
+    axes[0].set_title("Monthly weights by lookback (50/30/20 in the top three" +
+                      ("; hatched grey = cash)" if any_cash else "; always fully invested)"),
                       loc="left", fontsize=12, fontweight="bold")
     fig.legend(handles=[Patch(facecolor=ASSET_COLORS[a], edgecolor="#595959", label=a,
-                              hatch="////" if a == "CASH" else None) for a in assets],
+                              hatch="////" if a == "CASH" else None) for a in assets if a != "CASH" or any_cash],
                frameon=False, loc="lower center", ncols=7, fontsize=9)
     fig.subplots_adjust(hspace=0.12, bottom=0.14, left=0.1, right=0.98, top=0.93)
     return fig

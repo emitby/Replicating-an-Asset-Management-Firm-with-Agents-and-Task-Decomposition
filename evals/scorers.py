@@ -127,6 +127,17 @@ def analytics_consistency(run, threshold=1.0):
                  {"windows_checked": checks, "mismatches": bad[:20]})
 
 
+def saved_momentum_config(mom):
+    """The MomentumConfig a run actually used (from momentum.json), so older runs are judged by their own rules.
+    Runs saved before the cash_rules switch existed had cash rules on (v2)."""
+    p = dict(mom.get("params", {}))
+    p.setdefault("cash_rules", True)
+    for k in ("universe", "lookbacks", "slot_weights", "benchmarks"):
+        if k in p:
+            p[k] = tuple(p[k])
+    return MomentumConfig(**{k: v for k, v in p.items() if k in MomentumConfig.__dataclass_fields__})
+
+
 def momentum_reproducible(run, threshold=1.0):
     """Re-run every momentum sub-strategy from prices.csv: monthly weights and daily returns must match the
     saved run, and each month's compounded return must equal Σ weight × the ETF's month-over-month return."""
@@ -134,7 +145,7 @@ def momentum_reproducible(run, threshold=1.0):
     prices, saved, mom = run.csv("prices.csv"), run.csv("returns.csv"), run.json("momentum.json")
     if prices is None or saved is None or mom is None:
         return _missing("momentum_reproducible", threshold, "prices.csv/returns.csv/momentum.json")
-    fresh = run_all_momentum(prices, MomentumConfig())
+    fresh = run_all_momentum(prices, saved_momentum_config(mom))
     checks, details = {}, {}
     for L, r in fresh.items():
         name = f"MOM{L}"
@@ -163,13 +174,21 @@ def pros_cons_coverage(run, threshold=1.0):
     analytics, slides = run.json("analytics.json"), run.json("slides.json")
     if not analytics or slides is None or "comparison" not in analytics:
         return _missing("pros_cons_coverage", threshold, "momentum comparison in analytics.json / slides.json")
-    problems = momentum_section_problems(analytics, slides, MomentumConfig().lookbacks)
+    # Judge each run by the rule it was run with (v2 artifacts predate the switch and had cash rules).
+    params = (run.json("momentum.json") or {}).get("params", {})
+    cash_rules = params.get("cash_rules", True)
+    lookbacks = tuple(params.get("lookbacks", MomentumConfig().lookbacks))
+    problems = momentum_section_problems(analytics, slides, lookbacks, cash_rules=cash_rules)
     pages = run.pdf_pages()
+    disclosures = pages[-1] if pages else ""
     checks = {"section_complete": not problems,
               "cost_asymmetry_disclosed": any("do not include trading costs" in p for p in pages),
               "comparison_page_present": any("Head to Head Since 2011" in p for p in pages),
-              "momentum_detail_page_present": any("Momentum Detail" in p for p in pages)}
-    return Score("pros_cons_coverage", sum(checks.values()) / len(checks), threshold, {**checks, "problems": problems})
+              "momentum_detail_page_present": any("Momentum Detail" in p for p in pages),
+              # The disclosed rule must match the rule that was run.
+              "rule_disclosed_correctly": ("always fully invested" in disclosures) == (not cash_rules)}
+    return Score("pros_cons_coverage", sum(checks.values()) / len(checks), threshold,
+                 {**checks, "cash_rules": cash_rules, "problems": problems})
 
 
 # ------------------------------------------------------------- narrative/compliance

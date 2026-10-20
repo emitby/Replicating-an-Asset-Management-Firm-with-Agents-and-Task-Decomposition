@@ -48,14 +48,10 @@ DISCLOSURES = [
     "that assumption, and use adjusted closing prices, which include dividends. Partial calendar years are "
     "year-to-date.",
     "<b>Momentum methodology.</b> Five monthly momentum sub-strategies (1, 3, 6, 12 and 24-month lookbacks) "
-    "rank SPY, QQQ, TLT, GLD, IWM and IEF by trailing return at each month-end, and hold 50%, 30% and 20% in "
-    "the top three for the following month, from January 2011, rebalanced monthly. A slot whose ETF has a "
-    "negative trailing return is held in cash at an assumed 0% return; if all six are negative, the whole "
-    "sub-strategy holds cash for three months and then resumes. QQQ and SPY buy-and-hold are shown as "
-    "benchmarks. Momentum results "
+    "rank the six ETFs by trailing return at each month-end and, from January 2011, "
+    "{momentum_rule}. QQQ and SPY buy-and-hold are shown as benchmarks. Momentum results "
     "<b>do not include trading costs</b>, while the moving-average strategy is shown net of modeled costs, so "
-    "comparisons between them favor momentum by the cost of its switches. Cash earning 0% understates what "
-    "T-bills paid in some periods.",
+    "comparisons between them favor momentum by the cost of its switches.",
     "<b>In-sample results.</b> Comparisons of individual moving-average rules over the full period are "
     "in-sample. They are shown for context only, and overstate what an investor could have known in advance.",
     "<b>Risk.</b> Investing involves risk, including loss of principal. Trend-following signals can lag "
@@ -111,10 +107,12 @@ def num(v, d=2):
 
 
 class Deck:
-    def __init__(self, title, subtitle, cost_bps=5.0):
+    def __init__(self, title, subtitle, cost_bps=5.0, momentum_rule="see methodology", momentum_cash=False):
         self.title = title
         self.subtitle = subtitle
         self.cost_bps = cost_bps
+        self.momentum_rule = momentum_rule      # strategy.momentum.rule_text(): the single source of truth
+        self.momentum_cash = momentum_cash      # False: no cash columns or cash language anywhere
         self.pages = []
 
     # ------------------------------------------------------------- page types
@@ -356,7 +354,7 @@ class Deck:
         return t
 
     def _draw_comparison(self, c, comparison):
-        self._header(c, "Head to Head Since 2011: Momentum vs MA Strategy vs SPY and QQQ")
+        self._header(c, "Head to Head Since 2011: Momentum, MA, SPY and QQQ")
         series = list(comparison["windows"]["S2011"]["series"])
         wins = [w for w in ("3M", "1Y", "3Y", "5Y", "S2011") if w in comparison["windows"]]
         a = [["Return (3M total, else annualized)"] + ["Since 2011" if w == "S2011" else w for w in wins]]
@@ -374,9 +372,8 @@ class Deck:
         note_top = PAGE_H - 1.55 * inch - h1 - h2
         Frame(0.6 * inch, 0.66 * inch, PAGE_W - 1.2 * inch, note_top - 0.66 * inch, showBoundary=0).addFromList(
             [KeepInFrame(PAGE_W - 1.2 * inch, max(note_top - 0.66 * inch, 0.3 * inch), [_p(
-                f"Common period {span['start']} to {span['end']}. Momentum: 50% / 30% / 20% in the top three trailing "
-                "performers of SPY, QQQ, TLT, GLD, IWM and IEF each month (negative slots in cash at 0%; 3 months in "
-                "cash when all six are negative). <b>Momentum excludes trading costs; the MA strategy is net of "
+                f"Common period {span['start']} to {span['end']}. Momentum: {_safe(self.momentum_rule)}. "
+                "<b>Momentum excludes trading costs; the MA strategy is net of "
                 "modeled costs.</b> Ratios use the 13-week T-bill as the risk-free rate. Beta, correlation and capture "
                 "are measured vs SPY.", "small")], mode="shrink")], c)
 
@@ -413,20 +410,27 @@ class Deck:
         y = PAGE_H - 1.3 * inch
         cs = comparison.get("cost_sensitivity", {})
         bps = next(iter(cs.values()))["cost_bps"] if cs else self.cost_bps
+        # Without cash rules there is no cash anywhere: no CASH column and no cash-activity columns.
+        assets = self.ASSETS if self.momentum_cash else tuple(a for a in self.ASSETS if a != "CASH")
+        cash_head = ["All-cash months", "Avg cash weight"] if self.momentum_cash else []
+        cash_cells = (lambda s: [str(act[s]["full_cash_months"]), pct(act[s]["avg_cash_weight"])]) \
+            if self.momentum_cash else (lambda s: [])
+        act_widths = [2.0 * inch, 0.7 * inch, 0.85 * inch] + ([1.1 * inch] * 2 if self.momentum_cash else []) + \
+                     [0.8 * inch, 1.0 * inch, 1.0 * inch]
         tables = [
-            ([["Average weight since 2011"] + list(self.ASSETS)] +
-             [[self._label(s)] + [pct(summaries[s]["avg_weight"].get(a, 0.0)) for a in self.ASSETS] for s in moms],
-             [2.2 * inch] + [0.75 * inch] * len(self.ASSETS)),
-            ([["Current weights (" + comparison["end"][:7] + ")"] + list(self.ASSETS)] +
+            ([["Average weight since 2011"] + list(assets)] +
+             [[self._label(s)] + [pct(summaries[s]["avg_weight"].get(a, 0.0)) for a in assets] for s in moms],
+             [2.2 * inch] + [0.75 * inch] * len(assets)),
+            ([["Current weights (" + comparison["end"][:7] + ")"] + list(assets)] +
              [[self._label(s)] + [pct(act[s]["current_weights"][a]) if a in act[s]["current_weights"] else "-"
-                                  for a in self.ASSETS] for s in moms],
-             [2.2 * inch] + [0.75 * inch] * len(self.ASSETS)),
-            ([["Activity since 2011", "Months", "Rebalances", "All-cash months", "Avg cash weight",
-               "Turnover*", "CAGR as shown", f"CAGR at {bps:g} bps"]] +
-             [[self._label(s), str(act[s]["months"]), str(act[s]["rebalances"]), str(act[s]["full_cash_months"]),
-               pct(act[s]["avg_cash_weight"]), f"{cs[s]['turnover']:.1f}x", pct(cs[s]["cagr_gross"]),
-               pct(cs[s]["cagr_with_costs"])] for s in moms if s in cs],
-             [2.0 * inch, 0.7 * inch, 0.85 * inch, 1.1 * inch, 1.1 * inch, 0.8 * inch, 1.0 * inch, 1.0 * inch]),
+                                  for a in assets] for s in moms],
+             [2.2 * inch] + [0.75 * inch] * len(assets)),
+            ([["Activity since 2011", "Months", "Rebalances", *cash_head, "Turnover*", "CAGR as shown",
+               f"CAGR at {bps:g} bps"]] +
+             [[self._label(s), str(act[s]["months"]), str(act[s]["rebalances"]), *cash_cells(s),
+               f"{cs[s]['turnover']:.1f}x", pct(cs[s]["cagr_gross"]), pct(cs[s]["cagr_with_costs"])]
+              for s in moms if s in cs],
+             act_widths),
         ]
         for data, widths in tables:
             t = self._small_table(data, widths, font=8.8, pad=2.3)
@@ -491,7 +495,7 @@ class Deck:
         w = PAGE_W - 1.2 * inch
         Frame(0.6 * inch, 0.75 * inch, w, PAGE_H - 2.0 * inch, showBoundary=0).addFromList(
             [KeepInFrame(w, PAGE_H - 2.0 * inch,
-                         [_p(d.format(cost=f"{self.cost_bps:g}"), "body") for d in DISCLOSURES], mode="shrink")], c)
+                         [_p(d.format(cost=f"{self.cost_bps:g}", momentum_rule=_safe(self.momentum_rule)), "body") for d in DISCLOSURES], mode="shrink")], c)
 
 
 def chart_path(run_dir, kind):

@@ -1,4 +1,7 @@
-"""Multi-asset relative momentum, top-3 weighted, with per-slot and all-negative cash rules.
+"""Multi-asset relative momentum, top-3 weighted.
+
+v3 (default, cash_rules=False): always fully invested at 50/30/20 in the top three, even when
+trailing returns are negative. The rules below with cash apply only when cash_rules=True (v2).
 
 For a lookback of L months, at each month-end t:
     trailing[a] = P_a(t) / P_a(t - L months) - 1         for each asset a in the universe
@@ -29,6 +32,18 @@ class MomentumError(ValueError):
     pass
 
 
+def rule_text(mcfg):
+    """One authoritative plain-language description of the momentum rule, used in every prompt and
+    PDF note, so the deck can't describe a cash rule that isn't in effect (or omit one that is)."""
+    slots = " / ".join(f"{w:.0%}" for w in mcfg.slot_weights)
+    base = (f"hold {slots} in the top three trailing performers of {', '.join(mcfg.universe)} each month, "
+            "rebalanced monthly")
+    if mcfg.cash_rules:
+        return (base + f"; a slot whose ETF has a negative trailing return is held in cash (0%), and if all six "
+                f"are negative the whole sub-strategy holds cash for {mcfg.cash_months} months")
+    return base + "; always fully invested, even when trailing returns are negative (never in cash)"
+
+
 def month_end_prices(prices, universe):
     missing = [a for a in universe if a not in prices.columns]
     if missing:
@@ -40,18 +55,19 @@ def trailing_returns(monthly, lookback):
     return monthly / monthly.shift(lookback) - 1
 
 
-def target_weights(row, universe, slot_weights):
-    """Ranked top-N weights for one month; negative-return slots go to CASH."""
+def target_weights(row, universe, slot_weights, cash_rules=True):
+    """Ranked top-N weights for one month. With cash_rules, negative-return slots go to CASH;
+    without, every slot is invested in its ranked asset regardless of sign."""
     ranked = sorted(universe, key=lambda a: (-row[a], universe.index(a)))
     weights = {}
     for asset, w in zip(ranked, slot_weights):
-        key = asset if row[asset] >= 0 else CASH
+        key = asset if (row[asset] >= 0 or not cash_rules) else CASH
         weights[key] = round(weights.get(key, 0.0) + w, 10)
     return ranked, weights
 
 
 def run_momentum(prices, lookback, universe, start="2011-01-01", cash_months=3, cost_bps=0.0,
-                 slot_weights=(0.5, 0.3, 0.2)):
+                 slot_weights=(0.5, 0.3, 0.2), cash_rules=False):
     """Returns dict with daily weights, daily returns, the month-by-month history and a summary."""
     if lookback < 1:
         raise MomentumError("Lookback must be at least 1 month.")
@@ -73,7 +89,10 @@ def run_momentum(prices, lookback, universe, start="2011-01-01", cash_months=3, 
             break                                       # no trading days yet for the next month
         row = trail.loc[d]
         ranked = sorted(universe, key=lambda a: (-row[a], universe.index(a)))
-        if lock_left > 0:
+        if not cash_rules:
+            ranked, weights = target_weights(row, universe, slot_weights, cash_rules=False)
+            reason = "top 3 weighted (always invested)"
+        elif lock_left > 0:
             weights, lock_left, reason = {CASH: 1.0}, lock_left - 1, "cash lock"
         elif row.max() < 0:
             weights, lock_left, reason = {CASH: 1.0}, cash_months - 1, "all trailing returns negative"
@@ -139,7 +158,7 @@ def summarize(history, universe, turnover):
 
 def run_all_momentum(prices, mcfg):
     return {L: run_momentum(prices, L, mcfg.universe, mcfg.start, mcfg.cash_months, mcfg.cost_bps,
-                            mcfg.slot_weights)
+                            mcfg.slot_weights, mcfg.cash_rules)
             for L in mcfg.lookbacks}
 
 

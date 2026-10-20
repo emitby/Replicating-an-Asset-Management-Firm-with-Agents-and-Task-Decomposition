@@ -77,7 +77,7 @@ def test_no_negative_zero_in_formatting():
     from strategy.pdf import num, pct
     assert pct(-0.00004) == "0.0%" and pct(-0.0006) == "-0.1%" and pct(0.0) == "0.0%"
     assert num(-0.001) == "0.00" and num(-0.006) == "-0.01"
-    assert show(-0.00004, "cagr") == "0.0%" and show(-0.001, "sharpe") == 0.0
+    assert show(-0.00004, "cagr") == "0.0%" and show(-0.001, "sharpe") == "0.00" and show(1.1, "sharpe") == "1.10"
 
 
 def test_performance_footer_is_true_for_both_strategies():

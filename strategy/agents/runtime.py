@@ -165,7 +165,9 @@ class Agent:
             self.trace.log(agent=self.name, type="tool_crash", tool=block.name, error=repr(exc))
         self.trace.log(agent=self.name, type="tool", tool=block.name, input=block.input, ok=ok,
                        latency_s=round(time.perf_counter() - t0, 3),
-                       error=None if ok else content[:500])
+                       error=None if ok else content[:500],
+                       # The exact text returned to the model, so evals/token_profile.py can count its tokens.
+                       result=content, result_chars=len(content))
         result = {"type": "tool_result", "tool_use_id": block.id, "content": content}
         if not ok:
             result["is_error"] = True

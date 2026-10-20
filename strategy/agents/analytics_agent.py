@@ -5,6 +5,7 @@ from strategy.agents.runtime import Agent, Tool, ToolError, schema
 from strategy.analytics import (calendar_year_returns, comparison_extras, comparison_window, compute_window,
                                 growth_of, rolling_summary)
 from strategy.config import COMPARISON_WINDOWS, WINDOWS
+from strategy.momentum import rule_text
 from strategy.guardrails import check_text
 from strategy.paths import write_json
 
@@ -14,7 +15,7 @@ Your job:
 1. Compute metrics for every window: 3M, 1Y, 3Y, 5Y and SI (since the walk-forward start). 3M shows total returns only. Longer windows are annualized.
 2. Run the rolling and calendar-year analysis.
 3. Compute the head-to-head comparison (compute_comparison) for every window: 3M, 1Y, 3Y, 5Y and S2011 (since January 2011). It covers:
-   - the five monthly MOMENTUM sub-strategies (MOM1, MOM3, MOM6, MOM12, MOM24), each holding 50/30/20 in the top three trailing performers among SPY, QQQ, TLT, GLD, IWM and IEF. Negative slots are held in cash, with a 3-month all-cash lock when all six are negative.
+   - the five monthly MOMENTUM sub-strategies (MOM1, MOM3, MOM6, MOM12, MOM24). The rule: {rule}.
    - the MA trend strategy
    - two buy-and-hold benchmarks, SPY and QQQ
    Note that momentum has no modeled trading costs, while the MA strategy is net of costs.
@@ -118,7 +119,8 @@ def build(ctx):
              schema({"findings": {"type": "array", "items": {"type": "string"}, "minItems": 5, "maxItems": 9}},
                     ["findings"]), save),
     ]
-    return Agent(ctx.client, "Analytics Agent", PROMPT, tools, ctx.trace, effort="medium",
+    return Agent(ctx.client, "Analytics Agent", PROMPT.format(rule=rule_text(ctx.cfg.momentum)), tools, ctx.trace,
+                 effort="medium",
                  max_turns=ctx.cfg.max_turns_per_agent, token_budget=ctx.cfg.token_budget, model=ctx.cfg.model)
 
 
