@@ -165,3 +165,12 @@ def test_all_charts_render(workdir, prices, backtest_result):
     for kind in charts.CHART_KINDS:
         path = charts.render(kind, workdir / "charts", returns, analytics=analytics, history=wf["selection_history"])
         assert path.exists() and path.stat().st_size > 10_000
+
+
+def test_latest_run_is_none_on_a_fresh_clone(monkeypatch):
+    """Regression (found by the Evals CI workflow): with no runs/ folder yet, ``eval`` crashed in
+    ``latest_run`` instead of reporting "No runs found". It now returns None."""
+    import strategy.cli as cli
+    from strategy.paths import CACHE_DIR
+    monkeypatch.setattr(cli, "RUNS_DIR", CACHE_DIR / "test-output" / "no-runs-here")
+    assert cli.latest_run() is None

@@ -5,7 +5,7 @@
 [![CI](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/ci.yml/badge.svg)](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/ci.yml)
 [![Evals](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/evals.yml/badge.svg)](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/evals.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/unit%20tests-101%20passing-success)
+![Tests](https://img.shields.io/badge/unit%20tests-102%20passing-success)
 ![Evals](https://img.shields.io/badge/evals-14%2F14%20in%203%2F3%20live%20trials-success)
 ![Red-team](https://img.shields.io/badge/red--team-43%2F43-success)
 ![Claude](https://img.shields.io/badge/agents-claude--opus--5--5-8a5a2b)
@@ -27,7 +27,7 @@
 | Live trials of the full pipeline (non-deterministic agents) | **14 / 14 scorers in 3 of 3 trials**, $0.82–0.92 and 229–255 s each |
 | Guardrail red-team (invented numbers, guarantees, urgency, real firms, famous names, path escapes) | **43 / 43**, with benign look-alikes allowed |
 | Independent cross-check (momentum re-derived by separate code) | **Passes** on the final run and all 3 trials: 5 lookbacks × 190 months |
-| Unit tests (math, no look-ahead, guardrails, PDF, confinement) | **101 / 101 passing** on Python 3.10–3.12 in CI |
+| Unit tests (math, no look-ahead, guardrails, PDF, confinement) | **102 / 102 passing** on Python 3.10–3.12 in CI |
 | Numbers in agent prose | Every one must match a computed value at the precision written, or the slide is rejected |
 
 Getting here took two visual reviews and five rounds of live trials, each finding turned into a new scorer or guardrail. That history is in [docs/evals.md](docs/evals.md#lessons-from-the-first-live-run). The strategies' own performance is in [Strategy results](#strategy-results-from-the-live-run-of-2026-10-16).
@@ -150,7 +150,7 @@ Requires Python 3.10+ and an [Anthropic API key](https://console.anthropic.com/)
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --no-cache-dir -r requirements.txt
 
-.\run.ps1 test          # 101 unit tests, offline, free
+.\run.ps1 test          # 102 unit tests, offline, free
 .\run.ps1 run           # live pipeline: about 4–5 minutes, about $1
 .\run.ps1 eval          # score the latest run + 43 red-team cases (free)
 ```
@@ -198,7 +198,7 @@ Full list: [docs/guardrails.md](docs/guardrails.md).
 
 | Layer | Command | What it proves |
 |---|---|---|
-| Unit tests (101) | `run.ps1 test` | Correct math, **no look-ahead** for both strategies, walk-forward uses only past data, momentum ranking, always-invested rule (and the v2 cash rules), guardrails including their false positives, PDF disclosures, agent preconditions, confinement |
+| Unit tests (102) | `run.ps1 test` | Correct math, **no look-ahead** for both strategies, walk-forward uses only past data, momentum ranking, always-invested rule (and the v2 cash rules), guardrails including their false positives, PDF disclosures, agent preconditions, confinement |
 | Run scorers (14) | `run.ps1 eval` | Both strategies reproduce from saved prices, every lookback and Pro/Con slide is present, the narrative is 100% faithful and traceable, the pitch is balanced, compliance, team quality, PDF structure, cost |
 | Red-team (43) | included in `eval` | Guardrails block invented numbers, guarantees, urgency, real firms, famous names, persona contacts and path escapes, and allow benign look-alikes |
 | Independent cross-check | `python evals\crosscheck_momentum.py runs\<id>` | Momentum re-derived from prices by code that shares nothing with the project's momentum module |

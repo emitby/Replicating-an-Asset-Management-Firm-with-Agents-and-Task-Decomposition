@@ -64,7 +64,15 @@ def _summary(run_dir):
 
 
 def latest_run():
-    runs = sorted((d for d in confine(RUNS_DIR).iterdir() if (d / "manifest.json").exists()), key=lambda d: d.name)
+    """The newest finished run folder (one with a ``manifest.json``), or ``None``.
+
+    Returns ``None`` when ``runs/`` doesn't exist yet: a fresh clone (or CI) has never run
+    the pipeline, and ``eval`` should say "No runs found" rather than crash.
+    """
+    root = confine(RUNS_DIR)
+    if not root.is_dir():
+        return None
+    runs = sorted((d for d in root.iterdir() if (d / "manifest.json").exists()), key=lambda d: d.name)
     return runs[-1] if runs else None
 
 
