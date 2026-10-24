@@ -3,6 +3,7 @@
 **Five Claude agents replicate an asset manager's workflow, taking two trend strategies from raw market data to a 29-page investor PDF in which code verifies every number.**
 
 [![CI](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/ci.yml/badge.svg)](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/ci.yml)
+[![Evals](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/evals.yml/badge.svg)](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/evals.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/unit%20tests-101%20passing-success)
 ![Evals](https://img.shields.io/badge/evals-14%2F14%20in%203%2F3%20live%20trials-success)

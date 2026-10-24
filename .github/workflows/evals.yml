@@ -1,0 +1,27 @@
+# Offline evals on every push: free, deterministic, no API key.
+# Guardrail red-team (43 cases); run scorers apply to saved pipeline runs and live trials.
+# Live trials with the real agents cost money and run locally: see docs/evals.md.
+name: Evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install into project-local venv
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --no-cache-dir -r requirements.txt
+      - name: Guardrail red-team (via launcher so caches stay in the project)
+        run: sh ./run.sh eval
