@@ -57,6 +57,27 @@ def test_pdf_rebuilds_from_saved_artifacts_after_editing(offline_run, workdir):
     assert any("Edited Executive Summary" in p for p in pages(out))
 
 
+def test_pitchbook(offline_run):
+    """User request: a short "Pitchbook" with summary, performance, team (0 years), investment process, feedback,
+    compliance (fictional standards labelled) and disclosures, plus an appendix holding every other page."""
+    from evals.scorers import Run, pitchbook_structure
+    score = pitchbook_structure(Run(offline_run.run_dir))
+    assert score.passed, score.details
+    text = pages(offline_run.path("pitchbook.pdf"))
+    contents = next(i for i, p in enumerate(text) if p.lstrip().startswith("Appendix Section"))
+    assert contents <= 11                                       # the main section is short
+    assert all("APPENDIX" in p for p in text[contents + 1:])    # every appendix page carries its section tag
+    assert "does not claim compliance with the Global Investment Performance Standards" in " ".join(text)
+
+
+def test_pitchbook_rebuilds_from_saved_artifacts(offline_run, workdir):
+    from strategy.pitchbook import build_pitchbook_from_run
+    copy = workdir / "copy"
+    shutil.copytree(offline_run.run_dir, copy)
+    out = build_pitchbook_from_run(copy, "rebuilt.pdf")
+    assert len(PdfReader(str(out)).pages) == len(PdfReader(str(offline_run.path("pitchbook.pdf"))).pages)
+
+
 def test_build_from_run_names_missing_artifacts(workdir):
     with pytest.raises(FileNotFoundError, match="deck.json"):
         build_from_run(workdir)

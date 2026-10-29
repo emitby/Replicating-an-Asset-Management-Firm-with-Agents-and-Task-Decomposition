@@ -67,6 +67,8 @@ EVALS = {
                      "disclosures.",
     "pdf_disclosures": "Performance footer on every performance page, cost and hypothetical disclosures present.",
     "team_quality": "Six plausible fictional personas, each labelled.",
+    "pitchbook_structure": "Pitchbook main pages in order (summary, performance, team, investment process, feedback, "
+                           "compliance, disclosures) and every unused presentation page in its appendix.",
 }
 
 OTHER_EVAL_LAYERS = (

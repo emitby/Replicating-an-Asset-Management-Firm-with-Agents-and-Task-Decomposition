@@ -418,9 +418,46 @@ def team_quality(run, threshold=1.0):
     return _score("team_quality", checks, threshold, validation_error=err)
 
 
+PITCH_MAIN_TITLES = ("The Top Strategy:", "Performance:", "The Team:", "Investment Process",
+                     "Investment Process: Portfolio Manager and Analyst Dialogue", "Constructive Feedback",
+                     "Harsh Feedback", "Compliance", "Disclosures")
+
+
+def pitchbook_structure(run, threshold=1.0):
+    """The pitchbook has its main pages in order, and its appendix holds every unused presentation page."""
+    from pypdf import PdfReader
+    pdf = run.dir / "pitchbook.pdf"
+    if not pdf.exists() or not (run.dir / "presentation.pdf").exists():
+        return _missing("pitchbook_structure", threshold, "pitchbook.pdf or presentation.pdf")
+    pages = [re.sub(r"\s+", " ", p.extract_text() or "") for p in PdfReader(str(pdf)).pages]
+    deck = [p.strip()[:60] for p in run.pdf_pages()]          # the presentation's pages, by their opening text
+    appendix_at = next((i for i, p in enumerate(pages) if p.lstrip().startswith("Appendix Section")), None)
+    main = pages[1:appendix_at] if appendix_at else []
+    order = [next((i for i, p in enumerate(main) if p.lstrip().startswith(t)), None) for t in PITCH_MAIN_TITLES]
+    appendix = pages[appendix_at + 1:] if appendix_at else []
+    # Every presentation page except the cover, the flowchart and the two feedback pages (used in the main
+    # section) must appear in the appendix, matched by its first words.
+    reused = ("Agentic Capital Management Strategy Presentation", "The Agentic Workflow", "Constructive Feedback",
+              "Harsh Feedback")
+    needed = [t for t in deck if not t.startswith(reused)]
+    found = [t for t in needed if any(p.lstrip().startswith(t[:40]) for p in appendix)]
+    last_main = main[-1] if main else ""
+    checks = {
+        "title": PdfReader(str(pdf)).metadata.title == "Agentic Capital Management Pitchbook",
+        "main_pages_in_order": None not in order and order == sorted(order),
+        "main_section_is_short": 0 < len(main) <= 12,
+        "zero_years_experience": any("investing experience: 0 years" in p for p in main),
+        "compliance_fakes_labelled": any("FAKEGIPS" in p and "FAKECFA" in p and "fictional standards" in p for p in main),
+        "disclosures_all_fake_agentic_no_risk_mgmt": all(s in last_main for s in (
+            "This is all fake", "All of it is agentic", "Zero risk management", "no guarantee of future performance")),
+        "appendix_has_every_unused_page": len(found) == len(needed),
+    }
+    return _score("pitchbook_structure", checks, threshold, missing=[t for t in needed if t not in found])
+
+
 SCORERS = [run_health, data_integrity, research_coverage, research_reproducible, notebook_crosscheck, pm_protocol,
            dialogue_complete, narrative_faithfulness, compliance_language, cost_accounting, hook_enforcement,
-           pdf_structure, pdf_disclosures, team_quality]
+           pdf_structure, pdf_disclosures, team_quality, pitchbook_structure]
 
 
 def score_run(path):
@@ -436,14 +473,18 @@ def score_run(path):
     return scores
 
 
-def render_pages(run_dir, zoom=1.4):
-    """Render each PDF page to PNG under <run>/pages/ for visual review."""
+def render_pages(run_dir, pdf="presentation.pdf", zoom=1.4):
+    """Render each page of a run's PDF to PNG for visual review.
+
+    The presentation goes to <run>/pages/; any other PDF (e.g. pitchbook.pdf) to <run>/<name>-pages/.
+    """
     import pymupdf
     run_dir = confine(run_dir)
-    out = confine(Path(run_dir) / "pages")
+    folder = "pages" if pdf == "presentation.pdf" else f"{Path(pdf).stem}-pages"
+    out = confine(Path(run_dir) / folder)
     out.mkdir(exist_ok=True)
     paths = []
-    for i, page in enumerate(pymupdf.open(str(run_dir / "presentation.pdf")), start=1):
+    for i, page in enumerate(pymupdf.open(str(confine(run_dir / pdf))), start=1):
         target = confine(out / f"page-{i:02d}.png")
         page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).save(str(target))
         paths.append(target)

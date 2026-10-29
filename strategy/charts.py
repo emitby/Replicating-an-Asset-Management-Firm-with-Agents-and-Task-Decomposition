@@ -29,6 +29,8 @@ FINAL_COLORS = ("#1f4e79", "#2e9e6b", "#7030a0", "#bf9000", "#17becf")
 BENCH_COLORS = {"SPY": "#c55a11", "QQQ": "#000000"}
 CHART_KINDS = ("growth_final", "drawdowns_final", "round1_heatmap", "rounds_bars", "correlation", "blend")
 REQUIRED_CHARTS = ("growth_final", "drawdowns_final", "round1_heatmap", "rounds_bars", "correlation")
+# Charts drawn only by code for the pitchbook (not offered to the Presentation Agent).
+PITCH_CHARTS = ("pitch_performance",)
 
 
 class ChartError(ValueError):
@@ -108,7 +110,7 @@ def render(kind, out_dir, data):
         ChartError: unknown kind, or matplotlib's cache is outside the project.
     """
     assert_cache_confined()
-    if kind not in CHART_KINDS:
+    if kind not in CHART_KINDS + PITCH_CHARTS:
         raise ChartError(f"Unknown chart {kind!r}. Available: {list(CHART_KINDS)}.")
     fig, ax = plt.subplots(figsize=(9, 6.2))   # matches the slide's chart area, so no dead space
     r = data.returns
@@ -201,5 +203,24 @@ def render(kind, out_dir, data):
         ax.axhline(0, color="#888888", lw=0.8)
         _style(ax, f"{100 - w}% SPY + {w}% strategy vs SPY alone (rebalanced daily)")
         ax.legend(fontsize=8.5, frameon=False)
+
+    elif kind == "pitch_performance":
+        # The top strategy, the SPY + strategy blend, and the two benchmarks (pitchbook page 3).
+        top = data.final[0]
+        w = data.analytics["portfolio_fit"]["blend_weight"]
+        blend = (1 - w) * r["SPY"] + w * r[top]      # rebalanced daily, as in analytics.portfolio_fit
+        series = [(r[top], data.short(top), FINAL_COLORS[0], 2.4, "-"),
+                  (blend, f"{100 - round(w * 100)}% SPY + {round(w * 100)}% strategy", "#2e9e6b", 2.0, "-"),
+                  (r["SPY"], "SPY buy & hold", BENCH_COLORS["SPY"], 1.5, "--"),
+                  (r["QQQ"], "QQQ buy & hold", BENCH_COLORS["QQQ"], 1.5, "--")]
+        for s, label, color, lw, ls in series:
+            ax.plot((1 + s).cumprod() * 10_000, label=label, color=color, lw=lw, ls=ls)
+        ax.set_yscale("log")
+        ax.yaxis.set_major_locator(mtick.LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+        ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
+        ax.yaxis.set_minor_formatter(mtick.NullFormatter())
+        _style(ax, "Growth of $10,000: top strategy, SPY blend, SPY and QQQ (log scale)", pct_y=False)
+        ax.legend(fontsize=9, frameon=False, loc="upper left")
+        ax.set_xlabel("Hypothetical backtest; no trading costs", fontsize=8.5, color="#595959")
 
     return _save(fig, out_dir, kind)

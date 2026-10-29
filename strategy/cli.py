@@ -5,6 +5,7 @@ Always launch through run.ps1 / run.sh, which keep library caches inside the pro
     run.ps1 run [--offline]
     run.ps1 stage presentation --from runs/<id>
     run.ps1 build-pdf runs/<id>          # re-render the PDF from saved artifacts: no agents, no API calls
+    run.ps1 build-pitchbook runs/<id>    # build the short "Pitchbook" (with appendix), also from saved artifacts
     run.ps1 eval [--live] [--run runs/<id>] [--trials N]
     run.ps1 render-pages runs/<id>
     run.ps1 test
@@ -41,9 +42,13 @@ def main(argv=None):
     e.add_argument("--trials", type=int, default=1)
     g = sub.add_parser("render-pages", help="render PDF pages to PNG for review")
     g.add_argument("run", type=Path)
+    g.add_argument("--pdf", default="presentation.pdf", help="which PDF in the run folder (e.g. pitchbook.pdf)")
     b = sub.add_parser("build-pdf", help="rebuild the PDF from a finished run's saved artifacts (no agents)")
     b.add_argument("run", type=Path)
     b.add_argument("--out", default="presentation.pdf", help="output file name inside the run folder")
+    k = sub.add_parser("build-pitchbook", help="build the Pitchbook PDF from a finished run's saved artifacts")
+    k.add_argument("run", type=Path)
+    k.add_argument("--out", default="pitchbook.pdf", help="output file name inside the run folder")
     args = p.parse_args(argv)
     sandbox.install()
 
@@ -65,9 +70,12 @@ def main(argv=None):
     elif args.cmd == "build-pdf":
         from strategy.pdf import build_from_run
         print(build_from_run(confine(args.run), args.out))
+    elif args.cmd == "build-pitchbook":
+        from strategy.pitchbook import build_pitchbook_from_run
+        print(build_pitchbook_from_run(confine(args.run), args.out))
     elif args.cmd == "render-pages":
         from evals.scorers import render_pages
-        for path in render_pages(confine(args.run)):
+        for path in render_pages(confine(args.run), args.pdf):
             print(path)
 
 

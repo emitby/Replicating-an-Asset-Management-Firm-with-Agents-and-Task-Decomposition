@@ -214,9 +214,12 @@ def rerun_stage(ctx, name, source_run):
 
 
 def _final_render(ctx):
-    """Re-render the PDF from the saved artifacts, now that the manifest has the run's full cost."""
+    """Re-render the presentation from the saved artifacts, now that the manifest has the run's full cost,
+    and build the pitchbook (its appendix reuses the presentation's pages)."""
     from strategy.pdf import build_from_run
+    from strategy.pitchbook import build_pitchbook_from_run
     build_from_run(ctx.run_dir)
+    build_pitchbook_from_run(ctx.run_dir)
 
 
 def write_manifest(ctx, status, error, seconds, **extra):

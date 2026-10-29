@@ -5,7 +5,7 @@
 [![CI](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/ci.yml/badge.svg)](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/ci.yml)
 [![Evals](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/evals.yml/badge.svg)](https://github.com/emitby/Replicating-an-Asset-Management-Firm-with-Agents-and-Task-Decomposition/actions/workflows/evals.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/unit%20tests-156%20passing-success)
+![Tests](https://img.shields.io/badge/unit%20tests-158%20passing-success)
 ![Evals](https://img.shields.io/badge/evals-14%2F14%20in%203%2F3%20live%20trials-success)
 ![Red-team](https://img.shields.io/badge/red--team-74%2F74-success)
 ![Claude](https://img.shields.io/badge/agents-claude--opus--5--5-8a5a2b)
@@ -18,7 +18,7 @@
   <img src="docs/example/pages/page-08.png" width="49%" alt="Harsh Feedback: the PM agent attacks the analyst agents' process">
 </p>
 
-**→ [Example PDF: Agentic Capital Management Strategy Presentation](docs/example/presentation.pdf)** (26 pages) · **[Results](docs/results.md)** · **[How the agents work together](docs/agentic-workflows.md)** · **[Evals](docs/evals.md)** · **[Hooks and guardrails](docs/guardrails.md)**
+**→ [Example PDF: Agentic Capital Management Strategy Presentation](docs/example/presentation.pdf)** (26 pages) · **[Pitchbook](docs/example/pitchbook.pdf)** (10 pages + appendix) · **[Results](docs/results.md)** · **[How the agents work together](docs/agentic-workflows.md)** · **[Evals](docs/evals.md)** · **[Hooks and guardrails](docs/guardrails.md)**
 
 ## Results
 
@@ -27,7 +27,7 @@
 | Live trials of the full pipeline (non-deterministic agents), final code | **14 / 14 scorers in 3 of 3 trials**, $1.16–1.20 and 293–314 s each |
 | Red-team: invented numbers, promises, rigged PM decisions, delete commands, out-of-project paths | **74 / 74**, with benign look-alikes allowed |
 | Independent cross-check: the research notebook's own code re-runs all 89 strategies | **Match** on every daily return of all 89 (largest difference 8e-16, floating-point rounding) |
-| Unit tests (engine, agents, hooks, sandbox, cost accounting, PDF) | **156 / 156 passing** |
+| Unit tests (engine, agents, hooks, sandbox, cost accounting, PDF) | **158 / 158 passing** |
 | Numbers in agent prose | Every one must match a computed value at the precision written, or the text is rejected |
 
 ## What it does
@@ -97,9 +97,10 @@ Needs an [Anthropic API key](https://console.anthropic.com/) in `ANTHROPIC_API_K
 |---|---|
 | `run.ps1 run [--offline]` | Full pipeline (offline uses cached prices) |
 | `run.ps1 build-pdf runs\<id>` | **Rebuild the PDF from a finished run's saved files: no agents, no API cost.** Edit `deck.json` (or the layout code) and rebuild. |
+| `run.ps1 build-pitchbook runs\<id>` | Build the short **Pitchbook** (with appendix) from saved files: no agents, no API cost |
 | `run.ps1 stage <name> --from runs\<id>` | Re-run one stage (`data`, `research1`, `pm1`, `research2`, `pm2`, `analytics`, `team`, `presentation`) on an earlier run's artifacts |
-| `run.ps1 eval [--run runs\<id>] [--live --trials N]` | Score a run with the 14 scorers plus the 74-case red-team suite |
-| `run.ps1 render-pages runs\<id>` | Render PDF pages to PNG for visual review |
+| `run.ps1 eval [--run runs\<id>] [--live --trials N]` | Score a run with the 15 scorers plus the 74-case red-team suite |
+| `run.ps1 render-pages runs\<id> [--pdf pitchbook.pdf]` | Render PDF pages to PNG for visual review |
 | `run.ps1 test` | Unit tests |
 | `python -m evals.token_profile runs\<id> --markdown out.md` | Exact token counts per tool definition and result, with cost per tool |
 
@@ -122,6 +123,29 @@ Needs an [Anthropic API key](https://console.anthropic.com/) in `ANTHROPIC_API_K
 | 26 | Important disclosures | Code |
 
 Exact page numbers vary slightly by run, because the Presentation Agent chooses 1–3 slides per section.
+
+## The Pitchbook
+
+Every run also produces `pitchbook.pdf`: a 10-page pitch followed by an appendix holding every other page of the presentation. Code builds it from the run's saved files, so `build-pitchbook` can rebuild it at any time.
+
+| Page | Content |
+|---|---|
+| 1 | Cover |
+| 2 | **The top strategy and why it makes sense**: returns, correlation profile (highlighted), macro basket, diversification as a 20% SPY sleeve, systematic and agentic, and the trade-off |
+| 3 | **Performance**: growth of $10,000 (top strategy, 80/20 SPY blend, SPY, QQQ) and summary statistics overall and by period |
+| 4 | **The team**: org chart of the fictional analysts, and the callout "combined real-world investing experience: 0 years" |
+| 5 | **Investment Process**: the agentic workflow flowchart |
+| 6 | **Investment Process**: the Portfolio Manager ↔ analyst dialogue from the run |
+| 7–8 | **Constructive Feedback** and **Harsh Feedback** |
+| 9 | **Compliance**: "FAKEGIPS compliant" and "FAKECFA Code of Ethics" bullets, with a footnote that both are invented and that the firm claims no real GIPS compliance or CFA Institute affiliation |
+| 10 | **Disclosures**: this is all fake, all of it is agentic, zero risk management is applied, past results are no guarantee of future performance |
+| 11 | Appendix contents |
+| 12+ | Appendix A: strategy and research. B: risk and portfolio fit. C: process and governance. D: investment team. E: full disclosures. |
+
+<p align="center">
+  <img src="docs/example/pitchbook-pages/page-02.png" width="49%" alt="Pitchbook: the top strategy and why it makes sense">
+  <img src="docs/example/pitchbook-pages/page-03.png" width="49%" alt="Pitchbook: performance chart and summary statistics">
+</p>
 
 ## Hooks, guardrails and harness
 
@@ -153,8 +177,8 @@ strategy/                 the pipeline
   guardrails.py           numeric faithfulness, compliance language
   governance.py           code-owned descriptions shown in the PDF (tested against the code)
   pdf.py, charts.py       PDF and charts, rendered from saved artifacts only
-evals/                    14 scorers, red-team suite, notebook cross-check, token profile and chart
-tests/                    156 unit tests incl. a full scripted pipeline run
+evals/                    15 scorers, red-team suite, notebook cross-check, token profile and chart
+tests/                    158 unit tests incl. a full scripted pipeline run
 .claude/                  Claude Code hook (guard.py) and its settings
 docs/                     documentation, example PDF and pages
 download_prices.ipynb     the research notebook the strategy comes from

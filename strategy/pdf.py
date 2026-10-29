@@ -286,21 +286,31 @@ class Deck:
 
     PERFORMANCE_PAGES = {"table_grid", "table_rounds", "meeting", "feedback", "decision_log"}
 
+    DOC_TITLE = TITLE
+
     def build(self, path):
-        """Draw every page to `path` (confined to the project) and return it."""
+        """Draw every page to `path` (confined to the project) and return it.
+
+        `pages()` entries are ``(kind, args)`` or ``(kind, args, tag)``; a tag (e.g. "Appendix A: Research")
+        is drawn in the top-right corner of that page.
+        """
         path = confine(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         c = canvas.Canvas(str(path), pagesize=(PAGE_W, PAGE_H))
-        c.setTitle(TITLE)
+        c.setTitle(self.DOC_TITLE)
         c.setAuthor(AUTHOR)
         pages = self.pages()
-        for i, (kind, args) in enumerate(pages, start=1):
+        for i, (kind, args, *tag) in enumerate(pages, start=1):
             if kind == "slide":
                 self._draw_slide(c, **args)
                 perf = args.get("performance", False)
             else:
                 getattr(self, f"_draw_{kind}")(c, **args)
                 perf = kind in self.PERFORMANCE_PAGES
+            if tag:   # inside the navy top band, clear of any page title
+                c.setFont("Helvetica-Bold", 7)
+                c.setFillColor(colors.white)
+                c.drawRightString(PAGE_W - 0.6 * inch, PAGE_H - 0.125 * inch, tag[0].upper())
             self._footer(c, i, len(pages), perf)
             c.showPage()
         c.save()
@@ -366,7 +376,21 @@ class Deck:
         c.setFont("Helvetica", 10)
         c.drawString(0.6 * inch, PAGE_H - 2.35 * inch, f"Prepared {date.today():%B %d, %Y}  |  Backtest window "
                      f"{self.window}  |  Hypothetical backtested results")
+        self._about_columns(c, PAGE_H - 2.75 * inch, "presentation", "Pages 2-4 show")
 
+    def _draw_about(self, c, doc="pitchbook", where="Appendix C shows"):
+        """The deck's page-1 explanation of the agentic process, as a standalone page (used in the pitchbook)."""
+        self._header(c, "How AI Agents Produced This Document")
+        self._about_columns(c, PAGE_H - 1.3 * inch, doc, where)
+
+    def _about_columns(self, c, top, doc, where):
+        """Two columns: how the six agents produced the document, and the Research <-> PM back-and-forth.
+
+        Args:
+            top: y of the columns' top edge.
+            doc: what to call the document ("presentation", "pitchbook").
+            where: lead-in naming where the workflow and governance pages are ("Pages 2-4 show").
+        """
         pm, cfg = self.art.pm, self.cfg
         reps = pm["final"]["replacements"]
         swap = (f"{len(reps)} of the {cfg.n_proposals} new strategies beat the weakest of the top {cfg.top_n} and "
@@ -383,19 +407,19 @@ class Deck:
             f"<b>4. Portfolio Manager Agent, round 2.</b> A new strategy that beats the weakest of the top "
             f"{cfg.top_n} replaces it: {swap}. The PM explains every final decision.",
         ]
-        left = [_p("How AI agents produced this presentation", "h2"),
+        left = [_p(f"How AI agents produced this {doc}", "h2"),
                 _p("Six AI agents (Claude) ran the whole process, from downloading prices to writing these slides. "
                    "Code computes every number; agents decide what to examine, interpret the results and write. "
                    "A deterministic harness runs the agents in order and checks each one's work before the next "
                    "starts; hooks and guardrails police every tool call and every sentence.", "body"),
                 _p("The other agents: the <b>Data Agent</b> prepares and checks prices; the <b>Analytics Agent</b> "
                    "measures risk, return and portfolio fit of the final line-up; the <b>Presentation Agent</b> "
-                   "writes the slides; the <b>Team Agent</b> creates the fictional team. Pages 2-4 show the "
+                   f"writes the slides; the <b>Team Agent</b> creates the fictional team. {where} the "
                    "workflow, harness, hooks, guardrails and evals.", "body")]
         right = [_p("The Research and Portfolio Manager back-and-forth", "h2"), *[_p(s, "body") for s in steps],
                  _p("Their full exchange, with every rationale, pro and con, is in the decision log; a simulated "
                     "meeting between the agents summarizes it.", "small")]
-        top, bottom, gap = PAGE_H - 2.75 * inch, 0.75 * inch, 0.35 * inch
+        bottom, gap = 0.75 * inch, 0.35 * inch
         col = (PAGE_W - 1.2 * inch - gap) / 2
         self._flow(c, 0.6 * inch, bottom, col, top - bottom, left)
         self._flow(c, 0.6 * inch + col + gap, bottom, col, top - bottom, right)
@@ -431,9 +455,9 @@ class Deck:
             c.setFillColor(GREY)
             c.drawCentredString((x1 + x2) / 2 + label_dx * inch, (y1 + y2) / 2 + label_dy * inch, label)
 
-    def _draw_flowchart(self, c):
+    def _draw_flowchart(self, c, title="The Agentic Workflow"):
         """Page 2: the agentic workflow, the Research <-> PM loop, and where harness, hooks and evals act."""
-        self._header(c, "The Agentic Workflow")
+        self._header(c, title)
         # Gaps wide enough for the arrow labels, which sit above each arrow (they overlapped the boxes at 0.5").
         w, h, gap = 1.92 * inch, 0.95 * inch, 0.68 * inch
         xs = [0.6 * inch + i * (w + gap) for i in range(4)]

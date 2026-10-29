@@ -2,7 +2,7 @@
 
 Five layers, from cheapest to most expensive:
 
-1. **Unit tests** (156, `tests/`, free). These cover:
+1. **Unit tests** (158, `tests/`, free). These cover:
    - the engine: semantics, no look-ahead, and a match with the notebook implementation;
    - the agents' tools and protocol rules;
    - the hooks, the sandbox (in a child process) and the Claude Code guard;
@@ -11,12 +11,12 @@ Five layers, from cheapest to most expensive:
    - the governance text, which must match the scorers and hooks.
 
    A full **scripted six-agent run** (`tests/pipeline_script.py`) drives the real harness with a fake client.
-2. **Run scorers** (14, `evals/scorers.py`, free). Each one grades a finished run folder.
+2. **Run scorers** (15, `evals/scorers.py`, free). Each one grades a finished run folder.
 3. **Red-team suite** (74 cases, `evals/redteam.py`, free). Adversarial inputs that must be blocked, plus benign look-alikes that must pass.
 4. **Independent cross-check** (`evals/crosscheck_ranking.py`). The research notebook's own code, copied rather than imported, re-runs every strategy.
 5. **Live trials** (`eval --live`, about $1.20 each). The whole pipeline runs with real agents, and pass rates per scorer are reported.
 
-## The 14 scorers
+## The 15 scorers
 
 | Scorer | Passes when |
 |---|---|
@@ -34,6 +34,7 @@ Five layers, from cheapest to most expensive:
 | `pdf_structure` | Title, page 1 agent explanation, flowchart, harness and guardrails pages, one simulated meeting, decision log for both rounds, **exactly 2 analysis-table pages**, every section, diversification section, team, disclosures last |
 | `pdf_disclosures` | Performance footer on every numeric page; costs, hindsight, simulated and fictional disclosed |
 | `team_quality` | Six plausible, labelled fictional personas |
+| `pitchbook_structure` | Pitchbook main pages in order; short main section; "0 years" experience callout; FAKEGIPS/FAKECFA labelled fictional; disclosures cover all fake, all agentic, zero risk management and no guarantee; **every unused presentation page is in the appendix** |
 
 The scorer names equal `strategy.governance.EVALS`, which the PDF's evals page renders. A unit test keeps the two in sync.
 
