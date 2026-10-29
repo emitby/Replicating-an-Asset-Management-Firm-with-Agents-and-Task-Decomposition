@@ -391,6 +391,11 @@ class Deck:
             doc: what to call the document ("presentation", "pitchbook").
             where: lead-in naming where the workflow and governance pages are ("Pages 2-4 show").
         """
+        steps = self._loop_steps()
+        self._about_body(c, top, doc, where, steps)
+
+    def _loop_steps(self):
+        """The Research <-> PM back-and-forth as four numbered steps (ReportLab mini-HTML), with this run's outcome."""
         pm, cfg = self.art.pm, self.cfg
         reps = pm["final"]["replacements"]
         swap = (f"{len(reps)} of the {cfg.n_proposals} new strategies beat the weakest of the top {cfg.top_n} and "
@@ -407,6 +412,10 @@ class Deck:
             f"<b>4. Portfolio Manager Agent, round 2.</b> A new strategy that beats the weakest of the top "
             f"{cfg.top_n} replaces it: {swap}. The PM explains every final decision.",
         ]
+        return steps
+
+    def _about_body(self, c, top, doc, where, steps):
+        """Draw the two about-columns (see `_about_columns`) given the loop steps."""
         left = [_p(f"How AI agents produced this {doc}", "h2"),
                 _p("Six AI agents (Claude) ran the whole process, from downloading prices to writing these slides. "
                    "Code computes every number; agents decide what to examine, interpret the results and write. "

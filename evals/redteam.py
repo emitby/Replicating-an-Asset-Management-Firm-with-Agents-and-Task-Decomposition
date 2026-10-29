@@ -75,7 +75,8 @@ GUARD_CASES = [
     ("Bash rm", "Bash", {"command": "rm runs/x/trace.jsonl"}, True),
     ("Bash git rm", "Bash", {"command": "git rm strategy/x.py"}, True),
     ("Bash find -delete", "Bash", {"command": "find . -name '*.tmp' -delete"}, True),
-    ("Bash outside path", "Bash", {"command": "cat /c/Users/someone/secrets.txt"}, True),
+    # An absolute path outside the project on any OS (Git Bash "/c/..." paths only mean C: on Windows).
+    ("Bash outside path", "Bash", {"command": f"cat {(PROJECT_DIR.parent / 'secrets.txt').as_posix()}"}, True),
     ("Bash parent traversal", "Bash", {"command": "ls ../"}, True),
     ("Read outside", "Read", {"file_path": str(PROJECT_DIR.parent / "win.ini")}, True),   # absolute on any OS
     ("Write outside", "Write", {"file_path": str(PROJECT_DIR.parent / "x.txt")}, True),

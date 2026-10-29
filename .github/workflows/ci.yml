@@ -24,4 +24,10 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --no-cache-dir -r requirements.txt
       - name: Unit tests (offline, via launcher so caches stay in the project)
-        run: sh ./run.sh test -q
+        # Failing test names are also posted as annotations, which are public (job logs need a sign-in).
+        run: |
+          set +e
+          sh ./run.sh test -q -rfE > pytest.log 2>&1; status=$?
+          cat pytest.log
+          grep -E "^(FAILED|ERROR) " pytest.log | cut -c1-300 | sed 's/^/::error::/'
+          exit $status

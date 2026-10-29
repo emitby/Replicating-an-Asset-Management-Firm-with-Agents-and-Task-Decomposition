@@ -130,7 +130,7 @@ Every run also produces `pitchbook.pdf`: a 12-page pitch followed by an appendix
 
 | Page | Content |
 |---|---|
-| 1 | Cover |
+| 1 | **How the firm works**: the whole firm is AI agents (each agent's job, from data to pitchbook); how the strategy came out of the Portfolio Manager "discussing" it with the analyst over two rounds; the scaffolding (harness, hooks, guardrails, evals) |
 | 2 | **The top strategy and why it makes sense**: returns, correlation profile (highlighted), macro basket, diversification as a 20% SPY sleeve, systematic and agentic, and the trade-off |
 | 3 | **Performance**: growth of $10,000 (top strategy, 80/20 SPY blend, SPY, QQQ) and summary statistics overall and by period |
 | 4 | **The team**: org chart of the fictional analysts, and the callout "combined real-world investing experience: 0 years" |
@@ -145,6 +145,7 @@ Every run also produces `pitchbook.pdf`: a 12-page pitch followed by an appendix
 | 14+ | Appendix A: strategy and research. B: risk and portfolio fit. C: process and governance. D: investment team. E: full disclosures. |
 
 <p align="center">
+  <img src="docs/example/pitchbook-pages/page-01.png" width="49%" alt="Pitchbook page 1: a firm made entirely of AI agents">
   <img src="docs/example/pitchbook-pages/page-02.png" width="49%" alt="Pitchbook: the top strategy and why it makes sense">
   <img src="docs/example/pitchbook-pages/page-03.png" width="49%" alt="Pitchbook: performance chart and summary statistics">
 </p>

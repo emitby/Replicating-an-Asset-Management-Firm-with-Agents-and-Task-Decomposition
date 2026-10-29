@@ -118,7 +118,9 @@ def _guard():
     ("Bash", {"command": "ls && rmdir runs/x"}, True),
     ("Bash", {"command": "powershell Remove-Item x"}, True),
     ("Bash", {"command": "git rm README.md"}, True),
-    ("Bash", {"command": "cat /c/Windows/win.ini"}, True),
+    ("Bash", {"command": f"cat {(PROJECT_DIR.parent / 'win.ini').as_posix()}"}, True),     # outside on any OS
+    pytest.param("Bash", {"command": "cat /c/Windows/win.ini"}, True,                        # Git Bash drive path
+                 marks=pytest.mark.skipif(sys.platform != "win32", reason="/c/... means C: only in Git Bash")),
     ("Bash", {"command": "cp README.md ../copy.md"}, True),
     ("Read", {"file_path": str(PROJECT_DIR.parent / "win.ini")}, True),      # absolute on any OS (CI runs Linux)
     ("Edit", {"file_path": str(PROJECT_DIR.parent / "x.py")}, True),

@@ -1,5 +1,5 @@
 # Offline evals on every push: free, deterministic, no API key.
-# Guardrail red-team (43 cases); run scorers apply to saved pipeline runs and live trials.
+# Guardrail red-team (74 cases); run scorers apply to saved pipeline runs and live trials.
 # Live trials with the real agents cost money and run locally: see docs/evals.md.
 name: Evals
 
@@ -24,4 +24,10 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --no-cache-dir -r requirements.txt
       - name: Guardrail red-team (via launcher so caches stay in the project)
-        run: sh ./run.sh eval
+        # Failing cases are also posted as annotations, which are public (job logs need a sign-in).
+        run: |
+          set +e
+          sh ./run.sh eval > eval.log 2>&1; status=$?
+          cat eval.log
+          grep -E "FAIL|Error|Traceback" eval.log | cut -c1-300 | sed 's/^/::error::/'
+          exit $status

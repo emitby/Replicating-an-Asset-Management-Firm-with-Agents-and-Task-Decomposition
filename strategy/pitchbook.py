@@ -5,7 +5,8 @@ Built by code only, from the same saved run artifacts as the full presentation
 ``build-pitchbook runs/<id>``. The harness builds it at the end of every run.
 
 Main section (in order):
- 1. Cover.
+ 1. Cover: the firm is entirely AI agents (data to pitchbook), how the strategy came out of the PM
+    "discussing" it with the analyst, and the scaffolding (harness, hooks, guardrails, evals).
  2. Summary: the top strategy and why it makes sense (diversification,
     correlation profile, macro basket, systematic rules, agentic workflow), with a
     balancing caveat.
@@ -29,6 +30,8 @@ All text here is code-owned. Its numbers come straight from the run's saved
 results; agent-written text appears only where the presentation already
 showed it (slides, dialogue, feedback), unchanged.
 """
+
+from datetime import date
 
 from strategy import governance
 from strategy.charts import render, render_tool_costs
@@ -140,7 +143,8 @@ class Pitchbook(Deck):
                   ("decision_log", {"part": "selection"}), ("decision_log", {"part": "proposals"}), *s("round2"),
                   ("decision_log", {"part": "final"}), ("table_rounds", {})],
             "B": [*s("risk"), *s("diversification")],
-            "C": [("about", {}), ("meeting", {}), ("harness", {}), ("guardrails", {})],
+            # Page 1 now explains how the agents produced the document, so the "about" page isn't repeated here.
+            "C": [("meeting", {}), ("harness", {}), ("guardrails", {})],
             "D": [("team", {"members": team[:3], "heading": "Meet the Digital Investment Team (AI-generated, fictional)"}),
                   ("team", {"members": team[3:], "heading": "Digital Investment Team, continued (AI-generated, fictional)"})],
             "E": [("disclosures", {})],
@@ -179,23 +183,55 @@ class Pitchbook(Deck):
     # ------------------------------------------------------------ main pages
 
     def _draw_pitch_cover(self, c):
-        """Cover: title, subtitle, date and window, and the top strategy in one line."""
+        """Page 1: the title band, then how the whole firm is AI agents (data to pitchbook), how the strategy came
+        out of the Portfolio Manager "discussing" it with the analyst, and the scaffolding around the agents."""
         c.setFillColor(NAVY)
-        c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+        c.rect(0, PAGE_H - 2.2 * inch, PAGE_W, 2.2 * inch, fill=1, stroke=0)
         c.setFillColor(colors.white)
-        c.setFont("Helvetica-Bold", 34)
-        c.drawString(0.8 * inch, 5.3 * inch, PITCH_TITLE)
-        sub = ParagraphStyle("pitch_sub", fontName="Helvetica", fontSize=15, leading=19, textColor=colors.white)
-        self._flow(c, 0.8 * inch, 4.3 * inch, PAGE_W - 1.6 * inch, 0.85 * inch, [Paragraph(_safe(PITCH_SUBTITLE), sub)])
+        c.setFont("Helvetica-Bold", 30)
+        c.drawString(0.6 * inch, PAGE_H - 0.95 * inch, PITCH_TITLE)
+        sub = ParagraphStyle("pitch_sub", fontName="Helvetica", fontSize=13, leading=17, textColor=colors.white)
+        self._flow(c, 0.6 * inch, PAGE_H - 1.6 * inch, PAGE_W - 1.2 * inch, 0.45 * inch, [Paragraph(_safe(PITCH_SUBTITLE), sub)])
         c.setFillColor(ORANGE)
-        c.rect(0.8 * inch, 4.1 * inch, 1.2 * inch, 0.08 * inch, fill=1, stroke=0)
+        c.rect(0.6 * inch, PAGE_H - 1.72 * inch, 1.2 * inch, 0.07 * inch, fill=1, stroke=0)
         sid, _ = self._top()
         c.setFillColor(colors.white)
-        c.setFont("Helvetica", 11)
-        c.drawString(0.8 * inch, 3.65 * inch, f"Top strategy: {self._label(sid)}  |  Backtest window {self.window}")
-        c.setFont("Helvetica-Oblique", 9)
-        c.drawString(0.8 * inch, 0.6 * inch, "Hypothetical backtested results. Entirely fictional and AI-generated: "
-                     "see the disclosures. Not an offer or solicitation.")
+        c.setFont("Helvetica", 10)
+        c.drawString(0.6 * inch, PAGE_H - 2.0 * inch, f"Prepared {date.today():%B %d, %Y}  |  Top strategy: "
+                     f"{self._label(sid)}  |  Backtest window {self.window}  |  Hypothetical, entirely AI-generated")
+
+        # Column 1: the firm is agents. Descriptions come from strategy.governance (shared with the presentation).
+        firm = [_p("A firm made entirely of AI agents", "h2"),
+                _p("There are no people at Agentic Capital Management. Six AI agents (Claude) do the work, from raw "
+                   "market data to this pitchbook; code computes every number and they decide what to examine and "
+                   "write.", "log")]
+        firm += [_p(f"<b>{_safe(name)}.</b> {_safe(desc)}", "log") for name, desc in governance.AGENTS]
+        firm.append(_p("<b>Pitchbook.</b> Code, not an agent, renders the full presentation and this pitchbook from "
+                       "the agents' saved work, so every page can be rebuilt without re-running them.", "log"))
+        # Column 2: the strategy came out of a two-round "discussion" between the PM and the analyst.
+        talk = [_p("How the PM and the analyst \"discussed\" the strategy into existence", "h2"),
+                _p("The strategy wasn't designed up front. It came out of a structured conversation between the "
+                   "Portfolio Manager Agent and its analyst, the Research Agent, in written messages and tool calls:",
+                   "log"), *[_p(s, "log") for s in self._loop_steps()],
+                _p("Every message, pick and proposal carries its reasoning, a pro and a con (the dialogue is on page 6; "
+                   "the simulated meeting and the PM's constructive and harsh feedback follow it).", "log")]
+        # Column 3: the scaffolding that keeps the agents honest.
+        scaffold = [_p("The scaffolding around the agents", "h2"),
+                    _p("<b>Harness.</b> Deterministic Python runs the agents in order; after each one, a validator "
+                       "checks its saved work before the next starts. Every call is traced, with tokens and cost per "
+                       "agent and per tool.", "log"),
+                    _p("<b>Hooks.</b> Every tool call passes pre-tool hooks that deny file deletion and any path "
+                       "outside the project; a process sandbox blocks the same at the operating-system level.", "log"),
+                    _p("<b>Guardrails.</b> Every number an agent writes must match a computed result; promissory or "
+                       "urgent language is rejected; the PM's picks must match the ranking computed in code.", "log"),
+                    _p(f"<b>Evals.</b> {len(governance.EVALS)} scorers grade every finished run, a red-team suite "
+                       "attacks the guardrails and hooks, and an independent copy of the research notebook re-checks "
+                       "every strategy.", "log"),
+                    _p("Pages 9-10 show the costs per tool and the full scaffolding.", "small")]
+        top, bottom, gap = PAGE_H - 2.4 * inch, 0.75 * inch, 0.28 * inch
+        col = (PAGE_W - 1.2 * inch - 2 * gap) / 3
+        for i, flow in enumerate((firm, talk, scaffold)):
+            self._flow(c, 0.6 * inch + i * (col + gap), bottom, col, top - bottom, flow)
 
     def _draw_pitch_summary(self, c):
         """The top strategy and why it makes sense, from the run's computed results."""
@@ -427,7 +463,7 @@ class Pitchbook(Deck):
             "A": "Executive summary, strategy, round 1, analysis table 1, PM selection and proposals, decision log, "
                  "round 2, analysis table 2",
             "B": "Risk slides and the diversification section",
-            "C": "How the agents produced the document, the strategy meeting, harness, hooks, guardrails and evals",
+            "C": "The strategy meeting, and the full harness, hooks, guardrails and evals pages",
             "D": "Full profiles of the fictional investment team",
             "E": "The full presentation's important disclosures",
         }

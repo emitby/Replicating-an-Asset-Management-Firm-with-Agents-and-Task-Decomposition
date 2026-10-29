@@ -455,6 +455,9 @@ def pitchbook_structure(run, threshold=1.0):
     last_main = main[-1] if main else ""
     checks = {
         "title": PdfReader(str(pdf)).metadata.title == "Agentic Capital Management Pitchbook",
+        "first_page_explains_agents_loop_and_scaffolding": all(s in pages[0] for s in (
+            "A firm made entirely of AI agents", "discussed", "The scaffolding around the agents", "Harness", "Hooks",
+            "Guardrails", "Evals")),
         "main_pages_in_order": None not in order and order == sorted(order),
         "main_section_is_short": 0 < len(main) <= 13,
         "cost_page_matches_manifest": _cost_page_ok(run, main),
