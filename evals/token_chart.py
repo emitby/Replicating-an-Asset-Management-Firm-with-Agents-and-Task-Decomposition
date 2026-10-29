@@ -20,9 +20,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 from strategy.charts import assert_cache_confined  # noqa: E402
 from strategy.paths import confine  # noqa: E402
 
-AGENT_ORDER = ["Data Agent", "Backtest Agent", "Analytics Agent", "Team Agent", "Presentation Agent"]
-AGENT_COLORS = {"Data Agent": "#2a78d6", "Backtest Agent": "#eb6834", "Analytics Agent": "#1baf7a",
-                "Team Agent": "#eda100", "Presentation Agent": "#e87ba4"}
+AGENT_ORDER = ["Data Agent", "Research Agent", "Portfolio Manager Agent", "Analytics Agent", "Team Agent",
+               "Presentation Agent"]
+AGENT_COLORS = {"Data Agent": "#2a78d6", "Research Agent": "#1f4e79", "Portfolio Manager Agent": "#eb6834",
+                "Analytics Agent": "#1baf7a", "Team Agent": "#eda100", "Presentation Agent": "#e87ba4"}
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e5e1"
 
 
@@ -56,7 +57,7 @@ def main(run_dir, out_png):
             spine.set_visible(False)
     left.set_yticks(y, labels, fontsize=9, color=INK)
     handles = [plt.Rectangle((0, 0), 1, 1, color=AGENT_COLORS[a]) for a in AGENT_ORDER]
-    fig.legend(handles, AGENT_ORDER, loc="lower center", ncols=5, frameon=False, fontsize=9.5,
+    fig.legend(handles, AGENT_ORDER, loc="lower center", ncols=6, frameon=False, fontsize=9.5,
                labelcolor=INK, bbox_to_anchor=(0.5, -0.005))
     fig.suptitle(f"Agent tools vs tokens (exact counts, claude-opus-5-5 tokenizer, run {report['run']})",
                  x=0.01, ha="left", fontsize=13, fontweight="bold", color=INK)

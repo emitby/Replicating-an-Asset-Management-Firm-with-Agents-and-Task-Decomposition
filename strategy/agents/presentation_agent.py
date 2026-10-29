@@ -1,438 +1,241 @@
-"""Presentation Agent: writes the investor pitch and builds the PDF."""
+"""Presentation Agent: writes the slides of the "Agentic Capital Management Strategy Presentation".
 
-import re
+The agent writes slides into fixed sections (executive summary, strategy, round
+1, PM selection, round 2, risk, diversification). Every slide is guardrail-
+checked when added. `build_deck` enforces the deck's required content, saves
+the slides to deck.json and calls `pdf.build_from_run`, which renders the whole
+PDF (code pages, tables, decision log, meeting, team, disclosures) from saved
+artifacts. Because the PDF is built from deck.json, it can be edited and rebuilt
+later with ``build-pdf`` without this agent.
+"""
 
-from strategy import charts
+from strategy.agents import views
 from strategy.agents.display import display
-from strategy.analytics import adverse_windows, momentum_adverse
 from strategy.agents.runtime import Agent, Tool, ToolError, schema
+from strategy.charts import CHART_KINDS, REQUIRED_CHARTS, ChartData, render
 from strategy.guardrails import check_text, persona_mentions
-from strategy.momentum import rule_text
 from strategy.paths import write_json
-from strategy.pdf import Deck
+from strategy.pdf import SECTION_LIMITS, SECTIONS, SUBTITLE, TITLE, build_from_run
+from strategy.ranking import rule_text
 
-STANDARD_PAGES = ("metrics_table", "in_sample_comparison", "comparison_table", "momentum_supporting", "team")
-REQUIRED_CHARTS = ("equity_vs_spy", "drawdowns", "momentum_vs_benchmarks", "momentum_allocations")
-MAX_SLIDES, MIN_SLIDES = 22, 11
-LOOKBACK_TITLE = "{}-Month"          # each momentum sub-strategy needs a slide whose title contains this
-# A momentum lookback slide: "N-Month" together with "momentum" or "lookback" anywhere in the title
-# (agents have used both "3-Month Momentum" and "3-Month Lookback: Pros and Cons").
-LOOKBACK_TITLE_RE = re.compile(r"(?=.*\b\d+-month\b)(?=.*\b(momentum|lookback)\b)", re.IGNORECASE)
-class _CashMention:
-    """Matches "cash" unless negated within the few words before it. Accurate v3 statements such as
-    "never holds cash", "no cash", "not in cash" or "without moving to cash" are allowed. (A lookbehind
-    version only exempted "never in cash" and wrongly rejected "it never holds cash", which left the agent
-    unable to finish its deck.)"""
-    _word = re.compile(r"\bcash\b", re.IGNORECASE)
-    _negation = re.compile(r"\b(never|no|not|without|zero|nor)\b[\w\s-]{0,25}$", re.IGNORECASE)
+MAX_BULLETS, MAX_TITLE, MAX_BULLET = 6, 80, 240
+# What each section must say, checked on the section's combined text (lower case). Each entry is
+# (requirement shown to the agent, alternatives: any one word must appear).
+SECTION_RULES = {
+    # User requirement: correlation with SPY is highlighted wherever the strategy's benefits are explained.
+    "executive_summary": [("compare with SPY", ("spy",)), ("correlation with SPY", ("correlat",))],
+    "round1": [("at least one 'Pro:' bullet", ("pro:",)), ("at least one 'Con:' bullet", ("con:",))],
+    "pm_selection": [("explain the selection rule (total return)", ("total return",))],
+    "round2": [("say what the proposals changed (lookback or moving average)", ("lookback", "moving average", "sma"))],
+    "risk": [("drawdowns", ("drawdown",)), ("no trading costs", ("cost",)),
+             ("selection with hindsight across many tested strategies", ("hindsight", "in-sample", "selection bias")),
+             ("the long/short result", ("short",))],
+    "diversification": [("diversification", ("diversif",)), ("correlation with SPY", ("correlat",)),
+                        # Balance on the page itself, not only in the footer (visual review: the section was one-sided).
+                        ("a caveat on the same slides: hindsight selection or the years it lagged SPY",
+                         ("hindsight", "lagged", "lag ", "underperform"))],
+}
 
-    def search(self, text):
-        for m in self._word.finditer(text):
-            if not self._negation.search(text[max(0, m.start() - 40):m.start()]):
-                return m
-        return None
+PROMPT = """You are the Presentation Agent at Agentic Capital Management. You write the slides of the "{title}" for an investment committee. Code renders the PDF and owns these pages, so do NOT write slides for them: page 1 (how the agents produced the deck), the workflow flowchart, the harness/hooks and guardrails/evals pages, the simulated strategy meeting, the decision log of the Research <-> Portfolio Manager exchange, the two analysis-table pages, the team pages and the disclosures.
 
+The strategy: {rule}
+The process: the Research Agent backtested every combination, the Portfolio Manager Agent picked the top 5 by total return vs SPY, proposed 5 new parameter sets, the Research Agent ran them, and any that beat the weakest of the top 5 replaced it.
 
-CASH_WORD_RE = _CashMention()
-# Design-intent claims about limiting losses ("aimed at shallower drawdowns", "seeks to reduce drawdowns").
-DEFENSIVE_CLAIM_RE = re.compile(
-    r"\b(aim(s|ed)?|designed|seek(s|ing)?|intend(s|ed)?|built|meant)\b[^.;]{0,40}"
-    r"\b(reduc\w*|limit\w*|shallower|protect\w*|cushion\w*|defen\w*)\b[^.;]{0,30}\b(drawdowns?|losses|downside)\b"
-    r"|\bcase for momentum rests on drawdown", re.IGNORECASE)
-# A Con must name the lack of a defensive mechanism (v3).
-NO_DEFENSE_RE = re.compile(r"always (fully )?invested|no (defensive|downside|protective|protection)|"
-                           r"never (steps|moves|goes) (aside|to safety)|negative[- ]momentum|falling (etfs|assets)",
-                           re.IGNORECASE)
+Steps:
+1. Call list_metrics and get_dialogue. Read them fully.
+2. Render charts with render_chart and use them on slides. Required: {charts}.
+3. Add slides with add_slide, in these sections (min-max slides each):
+{sections}
+4. Call build_deck. If it reports problems, fix them with revise_slide or add_slide, and call build_deck again until it succeeds.
 
-PROMPT = """You are the Presentation Agent. You build an investor presentation that presents two systematic strategies clearly and honestly, and compares them.
+Section content:
+- executive_summary: what was tested, the final line-up and how it compares with SPY and QQQ, its correlation with SPY (the corr_spy figures), and the main trade-off.
+- strategy: how the ranking works, the signals, the lookbacks and the three portfolio rules.
+- round1: what the {n} strategies showed, with 'Pro:' and 'Con:' bullets (start the bullet with them).
+- pm_selection: how the PM chose the top 5 (highest total return) and why it proposed each new parameter set.
+- round2: what the proposals changed and whether they replaced anything.
+- risk: drawdowns and volatility vs SPY, no trading costs, the strategies were selected with hindsight from many tested on one period, and how the long/short variant did.
+- diversification: a positive, persuasive marketing section on how this strategy can fit in a diversified portfolio, for example as a satellite next to a core equity holding: its rotation across stocks, bonds, gold, oil and credit, its correlations, and the SPY blend. Lead with the correlation with SPY (corr_spy): it is the core of the diversification case; contrast it with QQQ's correlation with SPY. Be enthusiastic but factual, and keep one balancing bullet on these slides (the results were selected with hindsight, and the years it lagged SPY). Describe; don't instruct the reader ("investors could", not "diversify").
 
-1. **MA trend strategy:** holds SPY when SPY is above a moving average and IEF otherwise. The moving average (5, 20, 50 or 200 days) is re-selected each January using only prior data (walk-forward). It is net of modeled trading costs.
-2. **Multi-asset momentum:** five sub-strategies with 1, 3, 6, 12 and 24-month lookbacks.
-   - At each month-end, each one ranks SPY, QQQ, TLT, GLD, IWM and IEF by trailing return, from January 2011. The rule: {rule}.
-   - {cash_note}
-   - It has no trading costs.
-   - It is benchmarked against both SPY and QQQ buy-and-hold.
-
-The momentum section must include:
-- One slide per lookback, with a title containing "1-Month", "3-Month", "6-Month", "12-Month" or "24-Month", whose bullets start with "Pro:" or "Con:". Give at least one of each per slide.
-- Every item in list_metrics.momentum.MOMENTUM_CONS_REQUIRED must appear as a "Con:" on that lookback's slide.
-- A comparison slide covering momentum vs the MA strategy vs SPY **and QQQ** since 2011. Mention that momentum excludes trading costs.
-- The charts momentum_vs_benchmarks (growth vs SPY and QQQ) and momentum_allocations (monthly weights per lookback). comparison_returns and momentum_drawdowns are also available.
-- The standard pages comparison_table and momentum_supporting.
-- Describe the allocation accurately: three ETFs at 50/30/20, not "the top asset".
-
-Audience: sophisticated investors and allocators. Tone: confident, specific and balanced. A persuasive deck that is trustworthy, not hype.
-
-Build the deck:
-1. Call list_metrics to see every result you may cite, and get_team for the team.
-2. Render the charts you'll use. Always include equity_vs_spy and drawdowns. Also available: rolling_1y, allocation, window_returns, ma_selection, calendar_years.
-3. Add {min_slides}-{max_slides} slides with add_slide, in presentation order. A good arc:
-   - executive summary (the investment case in 3-4 bullets)
-   - the problem the strategy addresses (equity drawdowns)
-   - how the strategy works (rules, walk-forward discipline)
-   - performance vs SPY (with chart)
-   - risk and drawdown protection (with chart)
-   - performance by period: 3M, 1Y, 3Y, 5Y
-   - when it lags (honest trade-offs)
-   - portfolio fit: who it suits and how it complements other holdings
-   - next steps (generic, e.g. "request the full methodology"; no named contacts)
-4. Insert the standard pages where they belong with add_standard_page:
-   - metrics_table (risk and return by period)
-   - in_sample_comparison (context on each MA)
-   - team (the digital investment team bios)
-5. Call build_pdf. Then reply with a 2-3 sentence summary of the deck.
-
-Rules, enforced by code:
-- Every number must come from list_metrics, quoted as displayed (percentages to 1 decimal, ratios to 2) or rounded further. Never compute differences or new figures. Write "lower drawdown than SPY (X% vs Y%)", not a computed gap.
-- No promises or certainty about future results: no "guaranteed", "will outperform", "risk-free" and so on.
-- In-sample comparisons must be described as hindsight context, never as the strategy's result.
-- Pair the strategy's statistics with SPY's comparable figure, e.g. a best or worst rolling year for both.
-- The team appears only on the code-rendered team pages. Never name team members on your slides, and never present them as contacts. They are fictional.
-- No urgency or market-timing language ("act now", "why now").
-- Label partial calendar years as year-to-date, as list_metrics does.
-- Balance: list_metrics.MUST_ACKNOWLEDGE lists windows where the strategy did worse than SPY. Each one must appear on a slide, typically the trade-offs slide, naming the window and the metric. build_pdf enforces this. Don't lead with a benefit that only holds in some periods without saying so.
-- Describe it accurately: a tactical SPY/Treasury allocation strategy, not an "equity strategy". It captures only part of SPY's upside, so don't claim it "stays invested in rising markets" without qualification.
-- Every figure you cite also appears in the code-generated tables or the supporting-data appendix, so readers can trace it.
-- The first slide is an "Executive Summary" with a clear verdict: since 2011, how each momentum lookback and the MA strategy compared with SPY (return, Sharpe, drawdown), and which approach did best on which measure. Include MUST_ACKNOWLEDGE items such as 60/40 beating the MA strategy.
-- Ranges across variants ("X% to Y%") must use the true minimum and maximum of all the variants named. Check every variant before you write a range.
-- A difference of less than 1 percentage point (or 0.05 in a ratio) is a tie. Don't present it as a Pro (not even inside a Pro bullet alongside other points), and compare figures only on the same cost basis (momentum before costs vs MA after costs is not like-for-like). Apply this consistently on every slide: never call a gap "more than" on one slide and a "tie" on another. Never group a value into a tie with something it is below by 1 point or more.
-- Claims of a better risk-adjusted profile need support: if a lookback's Sharpe is below SPY's or QQQ's, say so where you discuss its smoother path. If you name a "best" option, say on which measure, and note any benchmark that beats it on that measure.
-- Turnover is a multiple of the portfolio (e.g. "105.9x"). Always write it with the "x".
-- Slide titles must describe what's on the slide. Don't promise a chart that isn't there.
-- The cost sensitivity in list_metrics shows momentum CAGR if charged the MA strategy's per-trade cost. Use it when discussing the cost asymmetry. When comparing a momentum return directly with the MA strategy (which is net of costs), use momentum's "cagr_with_costs" figure, or say explicitly that momentum is before costs.
-- Next-steps requests must not ask for analysis the deck already contains.
-- Bullets: at most 6 per slide, each under 220 characters. Slide titles under 70 characters.
-- Disclosures and footers are added automatically. Don't write them.
-If add_slide reports a violation, rewrite that slide and add it again. If build_pdf reports a problem with a slide you already added, fix it with revise_slide (same checks), then call build_pdf again. Don't stop until build_pdf succeeds."""
+Rules:
+- Quote only numbers from list_metrics or get_dialogue, exactly as displayed (percentages to 1 decimal, ratios to 2), or rounded further. Never compute new numbers (no differences, sums or averages of your own).
+- Pair a strategy statistic with SPY's where it helps. Label year-to-date periods as YTD.
+- Whenever a slide explains a benefit of the strategy, cite its correlation with SPY, written as "correlation with SPY of 0.16" (code highlights these phrases in the PDF).
+- Name the strategy every figure belongs to, and never attach one strategy's figure to another. A range ("X to Y") must be the true minimum and maximum of exactly the strategies you name.
+- No promises about future returns, no "guaranteed", "will outperform", "can't lose", no urgency. Never name team members.
+- At most {mb} bullets per slide, each under {ml} characters; titles under {mt} characters.
+- Don't write disclosures or footers; code adds them."""
 
 
 def build(ctx):
+    """Build the Presentation Agent.
+
+    Args:
+        ctx: the run context (needs research, PM, analytics and team results).
+
+    Returns:
+        A configured `Agent`.
+    """
+    cfg = ctx.cfg.ranking
+
+    def need():
+        missing = [n for n, v in (("analytics", ctx.analytics), ("final decision", ctx.pm.get("final")),
+                                  ("team", ctx.team)) if not v]
+        if missing:
+            raise ToolError(f"Missing inputs: {missing}.")
+
     def list_metrics():
-        if ctx.analytics is None or ctx.backtest is None:
-            raise ToolError("Analytics and backtest must be saved first.")
+        need()
         ctx.record("list_metrics")
-        a, b = ctx.analytics, ctx.backtest
-        counts = {}
-        for h in b["selection_history"]:
-            counts[f"{h['chosen_ma']}-day"] = counts.get(f"{h['chosen_ma']}-day", 0) + 1
+        final = ctx.pm["final"]["final"]
+        r1 = ctx.research[1]["ids"]
+        an = ctx.analytics
+        keep = ("total_return", "cagr", "volatility", "max_drawdown", "sharpe", "correlation", "beta",
+                "up_capture", "down_capture")
+        windows = {w: {"start": an["windows"][w]["start"], "end": an["windows"][w]["end"],
+                       "series": {s: display({k: v for k, v in m.items() if k in keep})
+                                  for s, m in an["windows"][w]["series"].items()}} for w in an["windows"]}
+        fit = an["portfolio_fit"]
+        last_year = max(an["calendar_years"], key=int)
         return {
-            "period": {"out_of_sample_start": b["oos_start"], "end": b["end"],
-                       "years_of_walk_forward_selection": b["years_selected"]},
-            "windows": display(tabled_windows(a["windows"])),
-            "rolling_1y": display(a["rolling_1y"]),
-            "growth_of_10000": {k: f"${v:,.0f}" for k, v in a["growth_of_10000"].items()},
-            "calendar_years": {_year_label(y, b["end"]): {k: f"{v * 100:.1f}%" for k, v in row.items()}
-                               for y, row in a["calendar_years"].items()},
-            "ma_selection_counts": counts,
-            "current_allocation_spy": display(b["current_allocation_spy"], "current_allocation_spy"),
-            "in_sample_candidates_HINDSIGHT_ONLY": display(
-                {k: {f: v[f] for f in CANDIDATE_FIELDS} for k, v in b["candidates_in_sample"].items()}),
-            "MUST_ACKNOWLEDGE": [
-                f"{x['window']}: MA strategy was worse than {x['vs']} on {', '.join(x['worse_on'])}"
-                for x in adverse_windows(a)],
-            "momentum": momentum_view(a["comparison"], b["momentum"], cash_rules=ctx.cfg.momentum.cash_rules),
+            "window": views.window(ctx), "strategies_tested": len(ctx.specs),
+            "benchmarks": views.benchmarks(ctx),
+            "final_lineup": views.ranked(ctx, final),
+            "round1_top5": views.ranked(ctx, [p["id"] for p in ctx.pm["top5"]]),
+            "round1_top10": views.ranked(ctx, r1)[:10],
+            "round1_bottom5": views.ranked(ctx, r1)[-5:],
+            "round1_beating_spy": int((ctx.scores.loc[r1, "excess_vs_spy"] > 0).sum()),
+            "round1_families": display(ctx.facts.get("round1_family", {})),
+            "proposals": views.ranked(ctx, [p["id"] for p in ctx.pm["proposals"]]),
+            "replacements": [{"added": views.row(ctx, r["added"]), "removed": views.row(ctx, r["removed"])}
+                             for r in ctx.pm["final"]["replacements"]],
+            "by_period": windows,
+            "calendar_years": {(f"{y} YTD" if y == last_year else y): {k: f"{v * 100:.1f}%" for k, v in row.items()}
+                               for y, row in an["calendar_years"].items()},
+            "growth_of_10000": {k: f"${v:,.0f}" for k, v in an["growth_of_10000"].items()},
+            "portfolio_fit": {
+                "blend": f"{100 - round(fit['blend_weight'] * 100)}% SPY + {round(fit['blend_weight'] * 100)}% strategy",
+                "correlation": {s: {a: f"{v:.2f}" for a, v in row.items()} for s, row in fit["correlation"].items()},
+                "blends": {s: display({k: v for k, v in m.items() if k in keep}) for s, m in fit["blends"].items()},
+                "spy_alone": display({k: v for k, v in fit["spy"].items() if k in keep})},
+            "analytics_findings": an["findings"],
+            "costs_modeled": "none (no trading costs, fees or taxes)",
         }
 
+    def get_dialogue():
+        need()
+        ctx.record("get_dialogue")
+        return {"dialogue": ctx.dialogue, "meeting": ctx.pm.get("meeting", [])}
+
     def get_team():
-        if ctx.team is None:
-            raise ToolError("The team isn't ready yet.")
-        return [{"name": m["name"], "title": m["title"], "focus": m["focus"]} for m in ctx.team["members"]]
+        need()
+        ctx.record("get_team")
+        return {"note": "Personas appear only on the code-rendered team pages. Never name them on slides.",
+                "members": [{"name": m["name"], "title": m["title"], "focus": m["focus"]} for m in ctx.team["members"]]}
+
+    def chart_data():
+        returns = ctx.returns
+        return ChartData(returns, ctx.scores, {sid: s.to_dict() for sid, s in ctx.specs.items()}, ctx.pm,
+                         ctx.analytics, ctx.research[1]["ids"])
 
     def render_chart(kind):
-        if ctx.returns is None:
-            raise ToolError("No returns loaded.")
-        try:
-            path = charts.render(kind, ctx.path("charts"), ctx.returns, analytics=ctx.analytics,
-                                 history=(ctx.backtest or {}).get("selection_history"))
-        except charts.ChartError as exc:
-            raise ToolError(str(exc)) from None
-        ctx.charts[kind] = path
+        need()
+        if kind not in CHART_KINDS:
+            raise ToolError(f"Charts are {list(CHART_KINDS)}.")
         ctx.record("render_chart", kind=kind)
-        return {"rendered": kind}
+        ctx.charts[kind] = render(kind, ctx.path("charts"), chart_data())
+        return {"rendered": kind, "use_on_slide": f"chart='{kind}'"}
 
-    def add_slide(title, bullets, chart=None):
-        if len([s for s in ctx.slides if s["type"] == "slide"]) >= MAX_SLIDES:
-            raise ToolError(f"Maximum {MAX_SLIDES} slides.")
-        performance = validated(title, bullets, chart)
-        ctx.slides.append({"type": "slide", "title": title, "bullets": bullets, "chart": chart,
-                           "performance": performance})
-        ctx.record("add_slide", title=title)
-        return {"added": title, "slide_number": len(ctx.slides) + 1, "performance_disclosure": performance}
-
-    def revise_slide(existing_title, title, bullets, chart=None):
-        """Replace an existing slide in place. Without this the agent could only append, so a rejection
-        at build_pdf about an earlier slide was unrecoverable."""
-        idx = next((i for i, s in enumerate(ctx.slides) if s["type"] == "slide" and s["title"] == existing_title), None)
-        if idx is None:
-            titles = [s["title"] for s in ctx.slides if s["type"] == "slide"]
-            raise ToolError(f"No slide titled {existing_title!r}. Existing slides: {titles}.")
-        performance = validated(title, bullets, chart)
-        ctx.slides[idx] = {"type": "slide", "title": title, "bullets": bullets, "chart": chart,
-                           "performance": performance}
-        ctx.record("revise_slide", title=title)
-        return {"revised": existing_title, "now": title, "position": idx + 2, "performance_disclosure": performance}
-
-    def validated(title, bullets, chart):
-        """Every guardrail a slide must pass, shared by add_slide and revise_slide. Returns the disclosure flag."""
-        if not 1 <= len(bullets) <= 6:
-            raise ToolError("Use 1-6 bullets.")
-        if len(title) > 70 or any(len(b) > 220 for b in bullets):
-            raise ToolError("Title must be under 70 characters, and each bullet under 220.")
+    def validated(section, title, bullets, chart):
+        if section not in SECTIONS:
+            raise ToolError(f"Sections are {list(SECTIONS)}.")
+        if not 1 <= len(bullets) <= MAX_BULLETS:
+            raise ToolError(f"Use 1-{MAX_BULLETS} bullets.")
+        if len(title) > MAX_TITLE or any(len(b) > MAX_BULLET for b in bullets):
+            raise ToolError(f"Titles under {MAX_TITLE} characters, bullets under {MAX_BULLET}.")
         if chart and chart not in ctx.charts:
             raise ToolError(f"Render chart {chart!r} first.")
         problems = check_text(" \n".join([title, *bullets]), ctx.number_index())
-        named = persona_mentions(" ".join([title, *bullets]), ctx.team)
-        if named:
-            problems.append(f"Names fictional personas {named}. Team members may appear only on the "
-                            "labeled team pages (add_standard_page 'team'). Refer to 'the investment team' instead, "
-                            "and never present a persona as a real contact.")
+        names = persona_mentions(" ".join([title, *bullets]), ctx.team)
+        if names:
+            problems.append(f"Don't name team members on slides: {names}.")
         if problems:
-            raise ToolError("Slide rejected by guardrails:\n" + "\n".join(problems))
-        # The builder, not the agent, decides when the performance disclosure applies.
-        return bool(chart) or any(ch.isdigit() for ch in " ".join([title, *bullets]))
+            raise ToolError("Slide rejected:\n" + "\n".join(problems))
+        return {"section": section, "title": title, "bullets": bullets, "chart": chart,
+                "performance": bool(chart) or any(ch.isdigit() for ch in " ".join(bullets))}
 
-    def add_standard_page(page):
-        if page not in STANDARD_PAGES:
-            raise ToolError(f"Standard pages: {list(STANDARD_PAGES)}.")
-        if any(s["type"] == page for s in ctx.slides):
-            raise ToolError(f"{page} already added.")
-        if page == "team" and ctx.team is None:
-            raise ToolError("The team isn't ready yet.")
-        ctx.slides.append({"type": page})
-        ctx.record("add_standard_page", page=page)
-        return {"added": page, "position": len(ctx.slides) + 1}
+    def add_slide(section, title, bullets, chart=None):
+        need()
+        if sum(s["section"] == section for s in ctx.slides) >= SECTION_LIMITS.get(section, (0, 0))[1]:
+            raise ToolError(f"Section {section!r} already has its maximum of {SECTION_LIMITS[section][1]} slides; "
+                            "use revise_slide.")
+        slide = validated(section, title, bullets, chart)
+        ctx.record("add_slide", title=title)
+        ctx.slides.append(slide)
+        return {"added": title, "slides": len(ctx.slides)}
 
-    def build_pdf():
-        n_slides = len([s for s in ctx.slides if s["type"] == "slide"])
-        if n_slides < MIN_SLIDES:
-            raise ToolError(f"Add at least {MIN_SLIDES} slides (have {n_slides}).")
-        used_charts = {s.get("chart") for s in ctx.slides}
-        missing = [c for c in REQUIRED_CHARTS if c not in used_charts]
+    def revise_slide(existing_title, section, title, bullets, chart=None):
+        idx = next((i for i, s in enumerate(ctx.slides) if s["title"] == existing_title), None)
+        if idx is None:
+            raise ToolError(f"No slide titled {existing_title!r}. Titles: {[s['title'] for s in ctx.slides]}.")
+        ctx.slides[idx] = validated(section, title, bullets, chart)
+        ctx.record("revise_slide", title=title)
+        return {"revised": title}
+
+    def deck_problems():
+        """Everything that must be true of the slides before the PDF is built."""
+        problems = []
+        for sec in SECTIONS:
+            lo, hi = SECTION_LIMITS[sec]
+            slides = [s for s in ctx.slides if s["section"] == sec]
+            if not lo <= len(slides) <= hi:
+                problems.append(f"Section {sec!r} needs {lo}-{hi} slides (has {len(slides)}).")
+            text = " ".join(" ".join([s["title"], *s["bullets"]]) for s in slides).lower()
+            for need_text, words in SECTION_RULES.get(sec, []):
+                if slides and not any(w in text for w in words):
+                    problems.append(f"Section {sec!r} must cover: {need_text}.")
+        used = {s["chart"] for s in ctx.slides if s["chart"]}
+        missing = [k for k in REQUIRED_CHARTS if k not in used]
         if missing:
-            raise ToolError(f"Slides must use charts {missing}.")
-        missing_pages = [p for p in STANDARD_PAGES if not any(s["type"] == p for s in ctx.slides)]
-        if missing_pages:
-            raise ToolError(f"Add standard pages {missing_pages}.")
-        problems = momentum_section_problems(ctx.analytics, ctx.slides, ctx.cfg.momentum.lookbacks,
-                                             cash_rules=ctx.cfg.momentum.cash_rules)
+            problems.append(f"Use these charts on slides: {missing}.")
+        return problems
+
+    def build_deck():
+        need()
+        problems = deck_problems()
         if problems:
-            raise ToolError("Momentum section incomplete:\n" + "\n".join(problems))
-        unacknowledged = unacknowledged_adverse(ctx.analytics, ctx.slides)
-        if unacknowledged:
-            raise ToolError("Balance check failed: the deck must acknowledge where the strategy was worse than SPY. "
-                            f"Not yet mentioned: {unacknowledged}. Add or revise a slide that names the window "
-                            "(e.g. '5-year') and the metric (drawdown and/or Sharpe).")
-        path = render_deck(ctx)
-        ctx.record("build_pdf")
-        return {"built": path.name, "pages": len(ctx.slides) + 2}
+            raise ToolError("Not ready:\n" + "\n".join(problems))
+        ctx.record("build_deck")
+        write_json(ctx.path("deck.json"), {"title": TITLE, "subtitle": SUBTITLE, "slides": ctx.slides,
+                                           "charts": sorted({s["chart"] for s in ctx.slides if s["chart"]})})
+        path = build_from_run(ctx.run_dir)
+        return {"built": path.name, "slides": len(ctx.slides)}
 
+    bullets = {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": MAX_BULLETS}
+    section = {"type": "string", "enum": list(SECTIONS)}
+    chart = {"type": "string", "enum": list(CHART_KINDS)}
     tools = [
-        Tool("list_metrics", "All results you may cite, display-rounded.", schema(), list_metrics),
-        Tool("get_team", "Names, titles and focus areas of the digital investment team.", schema(), get_team),
-        Tool("render_chart", "Render a chart for use on a slide.",
-             schema({"kind": {"type": "string", "enum": list(charts.CHART_KINDS)}}, ["kind"]), render_chart),
-        Tool("add_slide", "Append a slide. Text is checked by guardrails.",
-             schema({"title": {"type": "string"}, "bullets": {"type": "array", "items": {"type": "string"}},
-                     "chart": {"type": "string", "enum": list(charts.CHART_KINDS)}}, ["title", "bullets"]),
-             add_slide),
-        Tool("revise_slide", "Replace an existing slide (found by its current title) in place. Same checks as add_slide.",
-             schema({"existing_title": {"type": "string"}, "title": {"type": "string"},
-                     "bullets": {"type": "array", "items": {"type": "string"}},
-                     "chart": {"type": "string", "enum": list(charts.CHART_KINDS)}},
-                    ["existing_title", "title", "bullets"]), revise_slide),
-        Tool("add_standard_page", "Insert a code-generated page at the current position.",
-             schema({"page": {"type": "string", "enum": list(STANDARD_PAGES)}}, ["page"]), add_standard_page),
-        Tool("build_pdf", "Build presentation.pdf. Checks required content first.", schema(), build_pdf),
+        Tool("list_metrics", "Every verified figure for the slides: final line-up, rounds, by-period metrics, calendar "
+             "years, portfolio fit, analytics findings.", schema(), list_metrics),
+        Tool("get_dialogue", "The Research <-> Portfolio Manager messages and decisions, and the meeting script.",
+             schema(), get_dialogue),
+        Tool("get_team", "The fictional team (for context only; never name them on slides).", schema(), get_team),
+        Tool("render_chart", "Render a chart for use on a slide.", schema({"kind": chart}, ["kind"]), render_chart),
+        Tool("add_slide", "Add a slide to a section (guardrail-checked).",
+             schema({"section": section, "title": {"type": "string"}, "bullets": bullets, "chart": chart},
+                    ["section", "title", "bullets"]), add_slide),
+        Tool("revise_slide", "Replace an existing slide (same checks as add_slide).",
+             schema({"existing_title": {"type": "string"}, "section": section, "title": {"type": "string"},
+                     "bullets": bullets, "chart": chart}, ["existing_title", "section", "title", "bullets"]), revise_slide),
+        Tool("build_deck", "Check the slides, save deck.json and render the PDF.", schema(), build_deck),
     ]
-    mcfg = ctx.cfg.momentum
-    cash_note = ("Cash: when the rule's cash conditions apply, describe them exactly as stated."
-                 if mcfg.cash_rules else
-                 "It is ALWAYS fully invested: never describe momentum as holding, moving to, or rotating into cash. "
-                 "Negative-momentum ETFs can still be held, so it has NO defensive mechanism. Never say momentum (or "
-                 "'both strategies') aims, seeks or is designed to reduce drawdowns. Report drawdowns only as observed "
-                 "outcomes, and every lookback's slide needs a Con stating it is always invested with no defensive "
-                 "exit. Only the MA strategy has a defensive rule.")
-    prompt = PROMPT.format(min_slides=MIN_SLIDES, max_slides=MAX_SLIDES, rule=rule_text(mcfg), cash_note=cash_note)
-    return Agent(ctx.client, "Presentation Agent", prompt, tools, ctx.trace, effort="medium",
-                 max_turns=40, token_budget=ctx.cfg.token_budget, model=ctx.cfg.model)
-
-
-# Traceability contract: the agent sees exactly the fields the code-generated tables print,
-# so every figure it cites can be found by a reader (tested in test_every_citable_percentage_is_traceable_in_pdf).
-MAIN_FIELDS = ("total_return", "cagr", "volatility", "sharpe", "sortino", "max_drawdown", "calmar", "beta",
-               "correlation", "up_capture", "down_capture", "hit_rate", "best_day", "worst_day")
-MIX_FIELDS = ("total_return", "cagr", "volatility", "sharpe", "max_drawdown", "calmar")
-CANDIDATE_FIELDS = ("cagr", "volatility", "sharpe", "max_drawdown", "switches", "pct_time_in_spy")
-
-
-def tabled_windows(windows):
-    out = {}
-    for w, data in windows.items():
-        fields = {"Strategy": MAIN_FIELDS, "SPY": MAIN_FIELDS, "60/40": MIX_FIELDS}
-        out[w] = {"window": w, "start": data["start"], "end": data["end"], "annualized": data["annualized"],
-                  "series": {s: {k: v for k, v in data["series"][s].items() if k in fields[s]}
-                             for s in data["series"]},
-                  "strategy_activity": data["strategy_activity"]}
-    return out
-
-
-COMPARISON_FIELDS = ("cagr", "total_return", "volatility", "sharpe", "sortino", "max_drawdown", "calmar", "beta",
-                     "correlation", "up_capture", "down_capture")
-CON_WORDS = {"max_drawdown": ("drawdown",), "sharpe": ("sharpe", "risk-adjusted"),
-             "cagr": ("return", "cagr", "lag", "trail", "underperform")}
-
-
-def momentum_view(comparison, summaries, cash_rules=False):
-    """Exactly what the comparison pages print (traceability by construction). Without cash rules the
-    pages show no cash fields, so neither does this view."""
-    wins = comparison["windows"]
-    series = list(wins["S2011"]["series"])                     # MOM1..MOM24, MA Strategy, SPY, QQQ
-    moms = [s for s in series if s.startswith("MOM")]
-    pct = lambda d: {k: f"{v * 100:.1f}%" for k, v in d.items() if cash_rules or k != "CASH"}
-    act = wins["S2011"]["momentum_activity"]
-    cash_fields = (lambda s: {"full_cash_months": act[s]["full_cash_months"],
-                              "avg_cash_weight": f"{act[s]['avg_cash_weight'] * 100:.1f}%"}) \
-        if cash_rules else (lambda s: {})
-    return {
-        "period": {"start": comparison["start"], "end": comparison["end"]},
-        "returns_by_window_3M_total_else_annualized": {
-            s: {w: display(wins[w]["series"][s].get("cagr", wins[w]["series"][s]["total_return"]), "cagr")
-                for w in wins} for s in series},
-        "since_2011": {s: {k: display(wins["S2011"]["series"][s].get(k), k) for k in COMPARISON_FIELDS}
-                       for s in series},
-        "activity_since_2011": {s: {"months": act[s]["months"], "rebalances": act[s]["rebalances"],
-                                    **cash_fields(s), "current_weights": pct(act[s]["current_weights"])}
-                                for s in moms},
-        "avg_weight_since_2011": {s: pct(summaries[s]["avg_weight"]) for s in moms},
-        "calendar_years": {_year_label(y, comparison["end"]): {k: f"{v * 100:.1f}%" for k, v in row.items()}
-                           for y, row in comparison["calendar_years"].items()},
-        "growth_of_10000": {k: f"${v:,.0f}" for k, v in comparison["growth_of_10000"].items()},
-        "MOMENTUM_CONS_REQUIRED": {s: [f"worse than SPY since 2011 on {m}" for m in worse]
-                                   for s, worse in momentum_adverse(comparison).items()},
-        "costs_note": "Momentum excludes trading costs; the MA strategy is net of modeled costs.",
-        "cost_sensitivity_if_charged_ma_costs": {
-            k: {"turnover_x_portfolio": f"{v['turnover']:.1f}x", "cagr_gross": display(v["cagr_gross"], "cagr"),
-                "cagr_with_costs": display(v["cagr_with_costs"], "cagr")}
-            for k, v in comparison["cost_sensitivity"].items()},
-    }
-
-
-def momentum_section_problems(analytics, slides, lookbacks, cash_rules=False):
-    """Code-enforced structure: a Pro/Con slide per lookback covering its adverse metrics, plus a comparison slide.
-    When cash rules are off, no momentum slide may describe momentum as holding or moving to cash."""
-    agent = [s for s in slides if s["type"] == "slide"]
-    problems = []
-    if not cash_rules:
-        for s in agent:
-            text = " ".join([s["title"], *s["bullets"]])
-            is_momentum = LOOKBACK_TITLE_RE.search(s["title"]) or "momentum" in text.lower()
-            if is_momentum and CASH_WORD_RE.search(text):
-                problems.append(f"'{s['title']}' mentions cash, but momentum is always fully invested (no cash rule). "
-                                "Remove the cash reference.")
-            # Always-invested momentum has no defensive mechanism, so it must not be pitched as one.
-            # Checked per bullet: bullets about the MA strategy alone may describe its drawdown aim.
-            for b in s["bullets"]:
-                about_momentum = "momentum" in b.lower() or re.search(r"\bboth\b", b, re.IGNORECASE) \
-                    or (LOOKBACK_TITLE_RE.search(s["title"]) and "ma strategy" not in b.lower())
-                if about_momentum and DEFENSIVE_CLAIM_RE.search(b):
-                    problems.append(f"'{s['title']}': \"{b[:80]}\" presents momentum as aimed at reducing drawdowns, "
-                                    "but it is always fully invested with no defensive mechanism. Describe drawdowns "
-                                    "as an observed outcome, not a design aim.")
-    adverse = momentum_adverse(analytics["comparison"])
-    for L in lookbacks:
-        tag = LOOKBACK_TITLE.format(L).lower()
-        mine = [s for s in agent if tag in s["title"].lower()]
-        if not mine:
-            problems.append(f"No slide titled with '{LOOKBACK_TITLE.format(L)}' for the {L}-month sub-strategy.")
-            continue
-        bullets = [b.strip() for s in mine for b in s["bullets"]]
-        pros = [b for b in bullets if b.lower().startswith("pro:")]
-        cons = [b.lower() for b in bullets if b.lower().startswith("con:")]
-        if not pros or not cons:
-            problems.append(f"{L}-month slide needs at least one 'Pro:' and one 'Con:' bullet.")
-        for metric in adverse.get(f"MOM{L}", []):
-            if not any(any(w in c for w in CON_WORDS[metric]) for c in cons):
-                problems.append(f"{L}-month: a 'Con:' must cover that it was worse than SPY on {metric}.")
-        if not cash_rules and not any(NO_DEFENSE_RE.search(c) for c in cons):
-            problems.append(f"{L}-month: add a 'Con:' stating it is always fully invested with no defensive "
-                            "mechanism (it can hold falling, negative-momentum ETFs).")
-    summary = [s for s in agent if "summary" in s["title"].lower()]
-    if not summary or not all(k in " ".join([summary[0]["title"], *summary[0]["bullets"]]).lower()
-                              for k in ("momentum", "spy")):
-        problems.append("The Executive Summary slide must give the verdict across both strategies: how momentum "
-                        "and the MA strategy compared with SPY (and each other).")
-    if not any(all(k in " ".join([s["title"], *s["bullets"]]).lower() for k in ("momentum", "spy", "qqq"))
-               and any(k in " ".join([s["title"], *s["bullets"]]).lower() for k in ("moving average", "ma strategy", "trend"))
-               for s in agent):
-        problems.append("Add a comparison slide covering momentum vs the MA (trend) strategy vs SPY and QQQ.")
-    return problems
-
-
-WINDOW_WORDS = {
-    "3M": ("3m", "3-month", "three-month", "3 month", "past quarter", "last quarter"),
-    "1Y": ("1y", "1-year", "one-year", "1 year", "past year", "last year", "trailing year", "12-month", "12 month"),
-    "3Y": ("3y", "3-year", "three-year", "3 year"),
-    "5Y": ("5y", "5-year", "five-year", "5 year"),
-    "SI": ("since inception", "since 2007", "full period", "since the walk-forward"),
-}
-METRIC_WORDS = {"max_drawdown": ("drawdown",), "sharpe": ("sharpe", "risk-adjusted"),
-                "cagr": ("return", "cagr")}
-
-
-def unacknowledged_adverse(analytics, slides):
-    """Adverse (window, benchmark, metric) items that no bullet acknowledges.
-
-    The metric and the benchmark must appear in the SAME bullet; the window may come from that bullet
-    or the slide title. (A slide-level keyword match let a deck "acknowledge" 60/40 beating the MA
-    strategy without ever saying so: 60/40, Sharpe and the window were on one slide but in unrelated bullets.)
-    """
-    # Momentum lookback slides ("3-Month Momentum", "12-Month Momentum") are excluded: their titles contain
-    # window synonyms, so their Cons about momentum would otherwise "acknowledge" the MA strategy's weaknesses.
-    pairs = [(s["title"].lower(), b.lower()) for s in slides if s["type"] == "slide"
-             and not LOOKBACK_TITLE_RE.search(s["title"]) for b in s["bullets"]]
-    missing = []
-    for item in adverse_windows(analytics):
-        bench = item["vs"].lower()
-        for metric in item["worse_on"]:
-            if not any(any(w in f"{title} {b}" for w in WINDOW_WORDS[item["window"]]) and
-                       any(m in b for m in METRIC_WORDS[metric]) and bench in b for title, b in pairs):
-                missing.append(f"{item['window']} vs {item['vs']} {metric}")
-    return missing
-
-
-def _year_label(year, end):
-    """'2026 YTD (through 2026-10-16)' for an incomplete final year, else '2025'."""
-    year = int(year)
-    if str(year) == end[:4] and end[5:] < "12-24":
-        return f"{year} YTD (through {end})"
-    return str(year)
-
-
-def render_deck(ctx):
-    """Assemble the PDF from ctx.slides. Deterministic: also used by tests and re-renders."""
-    deck = Deck("Trend Rotation and Multi-Asset Momentum",
-                "Two systematic strategies compared: SPY/IEF moving-average rotation and a six-ETF monthly momentum rotation",
-                cost_bps=ctx.cfg.strategy.cost_bps, momentum_rule=rule_text(ctx.cfg.momentum),
-                momentum_cash=ctx.cfg.momentum.cash_rules)
-    for s in ctx.slides:
-        if s["type"] == "slide":
-            chart = ctx.charts.get(s["chart"]) if s.get("chart") else None
-            deck.add_slide(s["title"], s["bullets"], chart, s["performance"])
-        elif s["type"] == "metrics_table":
-            deck.add_metrics_table(ctx.analytics)
-        elif s["type"] == "in_sample_comparison":
-            deck.add_candidates_table(ctx.backtest["candidates_in_sample"], ctx.backtest["selection_history"],
-                                      period=f"{ctx.backtest['oos_start']} to {ctx.backtest['end']}")
-        elif s["type"] == "comparison_table":
-            deck.add_comparison_table(ctx.analytics["comparison"])
-        elif s["type"] == "momentum_supporting":
-            deck.add_momentum_supporting(ctx.analytics["comparison"], ctx.backtest["momentum"])
-        elif s["type"] == "team":
-            deck.add_team(ctx.team)
-    deck.add_supporting_data(ctx.analytics)      # always last before disclosures: makes cited figures traceable
-    write_json(ctx.path("slides.json"), ctx.slides)
-    return deck.build(ctx.path("presentation.pdf"))
+    sections = "\n".join(f"   - {s}: {lo}-{hi}" for s, (lo, hi) in SECTION_LIMITS.items())
+    prompt = PROMPT.format(title=TITLE, rule=rule_text(cfg), charts=", ".join(REQUIRED_CHARTS), sections=sections,
+                           n=cfg.grid_size, mb=MAX_BULLETS, ml=MAX_BULLET, mt=MAX_TITLE)
+    return Agent(ctx.client, "Presentation Agent", prompt, tools, ctx.trace, effort="medium", max_turns=40,
+                 token_budget=ctx.cfg.token_budget, model=ctx.cfg.model, hooks=ctx.hooks)
 
 
 def task(ctx):
-    return "Build the investor presentation and the PDF."
+    """The Presentation Agent's task message."""
+    return f"Write the slides for the {TITLE} and build the deck."

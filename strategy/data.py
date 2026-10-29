@@ -9,7 +9,7 @@ import hashlib
 import numpy as np
 import pandas as pd
 
-from strategy.config import ALLOWED_TICKERS, RATE_TICKER, RISK_ASSET, SAFE_ASSET
+from strategy.config import ALLOWED_TICKERS, RATE_TICKER, UNIVERSE
 from strategy.paths import CACHE_DIR, DATA_CACHE_DIR, confine, write_text
 
 RAW_CACHE = DATA_CACHE_DIR / "prices_raw.csv"
@@ -103,19 +103,29 @@ def quality_report(df):
 
 
 def clean(df):
-    """Keep days where both ETFs trade. Carry the T-bill yield forward over its
-    own holidays, and use 0 before it exists."""
-    for t in (RISK_ASSET, SAFE_ASSET, RATE_TICKER):
+    """Keep days on which every ETF in the universe traded (the notebook's ``dropna()``), and
+    carry the T-bill yield forward over its own holidays (0 before it exists).
+
+    Args:
+        df: raw adjusted closes, one column per ticker, including ``^IRX``.
+
+    Returns:
+        The cleaned DataFrame (completed sessions only).
+
+    Raises:
+        DataError: a universe ticker or ``^IRX`` is missing, too little history, or a non-positive price.
+    """
+    for t in (*UNIVERSE, RATE_TICKER):
         if t not in df.columns:
             raise DataError(f"Dataset is missing {t}.")
-    out = df.dropna(subset=[RISK_ASSET, SAFE_ASSET]).copy()
+    out = df.dropna(subset=list(UNIVERSE)).copy()
     # Yahoo returns the current session as a row while the market is open. Its "close" is
     # an intraday price, so only completed sessions (before today) are kept.
     out = out[out.index.normalize() < pd.Timestamp.today().normalize()]
     out[RATE_TICKER] = out[RATE_TICKER].ffill().fillna(0.0)
     if len(out) < MIN_YEARS * 252:
         raise DataError(f"Only {len(out)} usable rows; need about {MIN_YEARS} years.")
-    if (out[[RISK_ASSET, SAFE_ASSET]] <= 0).any().any():
+    if (out[list(UNIVERSE)] <= 0).any().any():
         raise DataError("Non-positive prices found.")
     return out
 
@@ -124,18 +134,28 @@ def dataset_hash(df):
     return hashlib.sha256(pd.util.hash_pandas_object(df, index=True).values.tobytes()).hexdigest()[:16]
 
 
-def synthetic_prices(years=20, seed=7):
-    """Deterministic fake market for tests and offline evals."""
+def synthetic_prices(years=12, seed=7):
+    """Deterministic fake market for tests and offline evals (no network).
+
+    Each universe ETF follows a random walk with its own drift, volatility and a slow
+    sinusoidal trend (so that rankings change over time); ``^IRX`` wanders between 0% and 6%.
+
+    Args:
+        years: length of the series in years of 252 business days, starting 2014-01-01.
+        seed: random seed.
+
+    Returns:
+        A DataFrame with the universe columns plus ``^IRX``.
+    """
     rng = np.random.default_rng(seed)
-    idx = pd.bdate_range("2003-01-01", periods=years * 252)
-    regime = np.sin(np.arange(len(idx)) / 400.0)
-    spy = 100 * np.exp(np.cumsum(0.0003 + 0.0006 * regime + 0.011 * rng.standard_normal(len(idx))))
-    ief = 80 * np.exp(np.cumsum(0.00015 - 0.0002 * regime + 0.004 * rng.standard_normal(len(idx))))
-    irx = np.clip(2.0 + 1.5 * regime + 0.05 * np.cumsum(rng.standard_normal(len(idx))) / 10, 0, 6)
-    df = pd.DataFrame({RISK_ASSET: spy, SAFE_ASSET: ief, RATE_TICKER: irx}, index=idx)
-    # Momentum universe: drawn after the series above, so SPY/IEF are unchanged for older tests.
-    for name, drift, vol, phase in (("QQQ", 0.0004, 0.014, 0.5), ("TLT", 0.0002, 0.009, 3.0),
-                                    ("GLD", 0.0002, 0.010, 1.7), ("IWM", 0.0003, 0.015, 0.9)):
-        trend = 0.0007 * np.sin(np.arange(len(idx)) / 300.0 + phase)
+    idx = pd.bdate_range("2014-01-01", periods=years * 252)
+    t = np.arange(len(idx))
+    df = pd.DataFrame(index=idx)
+    params = {"SPY": (0.0004, 0.011, 0.0), "QQQ": (0.0005, 0.014, 0.5), "TLT": (0.0001, 0.009, 3.0),
+              "IEF": (0.0001, 0.004, 2.5), "GLD": (0.0002, 0.010, 1.7), "USO": (0.0000, 0.022, 4.1),
+              "JNK": (0.0002, 0.005, 1.1)}
+    for name, (drift, vol, phase) in params.items():
+        trend = 0.0008 * np.sin(t / 300.0 + phase)
         df[name] = 100 * np.exp(np.cumsum(drift + trend + vol * rng.standard_normal(len(idx))))
+    df[RATE_TICKER] = np.clip(2.0 + 1.5 * np.sin(t / 400.0) + 0.05 * np.cumsum(rng.standard_normal(len(idx))) / 10, 0, 6)
     return df

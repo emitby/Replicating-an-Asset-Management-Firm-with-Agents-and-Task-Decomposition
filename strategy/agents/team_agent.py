@@ -4,9 +4,9 @@ from strategy.agents.runtime import Agent, Tool, ToolError, schema
 from strategy.paths import write_json
 from strategy.team import ALLOWED_CERTIFICATIONS, CURRENT_YEAR, validate_team
 
-PROMPT = """You are the Team Agent. You create a "digital investment team" of AI personas who will present two systematic strategies to investors: a SPY/IEF moving-average trend rotation, and a monthly multi-asset momentum strategy across SPY, QQQ, TLT, GLD, IWM and IEF. The team is explicitly fictional, and the final document labels every member as an AI-generated fictional persona.
+PROMPT = """You are the Team Agent. You create a "digital investment team" of AI personas who will present a systematic strategy to investors: a monthly ranking of seven ETFs (SPY, QQQ, TLT, IEF, GLD, USO, JNK) on the % change of their price or moving average, holding the leaders until the next month end. The team is explicitly fictional, and the final document labels every member as an AI-generated fictional persona.
 
-Create exactly 6 members: 1 Portfolio Manager and 5 Analysts. Each analyst has a distinct focus that clearly matters to this strategy, such as quantitative research and signal design, risk management, macro and interest rates (the IEF side), market data engineering and backtest integrity, and trading and execution or investor communications.
+Create exactly 6 members: 1 Portfolio Manager and 5 Analysts. Each analyst has a distinct focus that clearly matters to this strategy, such as quantitative research and signal design, risk management, macro and cross-asset (bonds, gold, oil, credit), market data engineering and backtest integrity, and trading and execution or investor communications.
 
 For each member provide:
 - a realistic but invented full name, and a title
@@ -58,8 +58,9 @@ def build(ctx):
                          ["members"]), submit)]
     prompt = PROMPT.format(certs=", ".join(sorted(ALLOWED_CERTIFICATIONS)), year=CURRENT_YEAR)
     return Agent(ctx.client, "Team Agent", prompt, tools, ctx.trace, effort="low",
-                 max_turns=8, token_budget=ctx.cfg.token_budget, model=ctx.cfg.model)
+                 max_turns=8, token_budget=ctx.cfg.token_budget, model=ctx.cfg.model,
+                 hooks=ctx.hooks)
 
 
 def task(ctx):
-    return "Create the digital investment team for the trend rotation and multi-asset momentum strategies."
+    return "Create the digital investment team for the month-end ETF ranking strategy."

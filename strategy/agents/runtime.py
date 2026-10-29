@@ -4,6 +4,20 @@ Same core loop as the other projects: call Claude, run requested tools
 (concurrently), append all results in one message, repeat until a text reply.
 The history is append-only. Bad arguments and domain errors come back to the
 model as `is_error` tool results so it can correct itself.
+
+Two additions for this project:
+
+- **Hooks.** Every tool call passes through the run's pre-tool hooks (which can
+  deny it, see `strategy.hooks`) and post-tool hooks.
+- **Cost per tool.** Each model call's usage is attributed to the content that
+  caused it, so the manifest can report tokens and dollars per tool:
+  - input-side tokens (fresh input, cache writes, cache reads) are split across
+    the history segments the call re-read, by owner, in proportion to their
+    characters. Owners are "(system & tool definitions)", "(task)", "(agent
+    text)" and each tool, which owns its tool_use requests and its results;
+  - output tokens are split across the call's text and tool_use blocks the same way;
+  - each share is priced at that call's actual rates, so the per-tool costs sum
+    exactly to the run's total cost.
 """
 
 import inspect
@@ -64,6 +78,8 @@ class Trace:
         self._lock = threading.Lock()
         self.usage = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
         self.by_agent = {}
+        self.by_tool = {}          # owner -> {"input_tokens", "output_tokens", "cost_usd"} (floats)
+        self.by_agent_tool = {}    # agent -> owner -> same
 
     def log(self, **event):
         event["ts"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -81,6 +97,36 @@ class Trace:
                 self.by_agent.setdefault(agent, dict.fromkeys(self.usage, 0))[k] += v
         return u
 
+    def attribute(self, agent, history, output, usage):
+        """Attribute one model call's usage to the owners of its input and output content.
+
+        Args:
+            agent: the calling agent's name.
+            history: ``[(owner, chars), ...]`` for everything sent in the request.
+            output: ``[(owner, chars), ...]`` for the response blocks.
+            usage: the call's usage dict from `add_usage`.
+
+        Side effects:
+            Adds proportional token and dollar shares to `by_tool` and `by_agent_tool`.
+        """
+        in_tokens = usage["input"] + usage["cache_write"] + usage["cache_read"]
+        in_cost = sum(usage[k] * PRICES[k] for k in ("input", "cache_write", "cache_read")) / 1_000_000
+        out_tokens, out_cost = usage["output"], usage["output"] * PRICES["output"] / 1_000_000
+        with self._lock:
+            for parts, tokens, cost, kind in ((history, in_tokens, in_cost, "input_tokens"),
+                                              (output, out_tokens, out_cost, "output_tokens")):
+                for owner, share in _shares(parts).items():
+                    for table in (self.by_tool, self.by_agent_tool.setdefault(agent, {})):
+                        row = table.setdefault(owner, {"input_tokens": 0.0, "output_tokens": 0.0, "cost_usd": 0.0})
+                        row[kind] += tokens * share
+                        row["cost_usd"] += cost * share
+
+    def tool_report(self):
+        """Per-owner tokens and cost, rounded for the manifest, most expensive first."""
+        rows = sorted(self.by_tool.items(), key=lambda kv: -kv[1]["cost_usd"])
+        return {owner: {"input_tokens": round(r["input_tokens"]), "output_tokens": round(r["output_tokens"]),
+                        "cost_usd": round(r["cost_usd"], 4)} for owner, r in rows}
+
     @property
     def total_tokens(self):
         return sum(self.usage.values())
@@ -95,9 +141,36 @@ class Trace:
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line]
 
 
+SYSTEM_OWNER, TASK_OWNER, TEXT_OWNER = "(system & tool definitions)", "(task)", "(agent text)"
+
+
+def _shares(parts):
+    """Fractions of the total characters owned by each owner (all to "(agent text)" if empty)."""
+    total = sum(chars for _, chars in parts)
+    if total <= 0:
+        return {TEXT_OWNER: 1.0}
+    out = {}
+    for owner, chars in parts:
+        out[owner] = out.get(owner, 0.0) + chars / total
+    return out
+
+
+def _output_parts(content):
+    """``[(owner, chars)]`` for a response: text and thinking belong to the agent, tool_use to its tool."""
+    parts = []
+    for b in content:
+        if b.type == "tool_use":
+            parts.append((b.name, len(b.name) + len(json.dumps(b.input, default=str))))
+        elif b.type == "text":
+            parts.append((TEXT_OWNER, len(b.text)))
+        elif b.type == "thinking":
+            parts.append((TEXT_OWNER, len(getattr(b, "thinking", "") or "")))
+    return parts
+
+
 class Agent:
     def __init__(self, client, name, system, tools, trace, effort="medium", max_turns=20,
-                 token_budget=None, model=MODEL):
+                 token_budget=None, model=MODEL, hooks=None):
         self.client = client
         self.name = name
         self.system = system
@@ -108,10 +181,13 @@ class Agent:
         self.max_turns = max_turns
         self.token_budget = token_budget
         self.model = model
+        self.hooks = hooks
 
     def run(self, task):
         """Run the agent on one task until it replies in text. Returns the reply."""
         messages = [{"role": "user", "content": task}]
+        # Who owns each piece of the growing history, for per-tool cost attribution.
+        ledger = [(SYSTEM_OWNER, len(self.system) + len(json.dumps(self.tool_params))), (TASK_OWNER, len(task))]
         self.trace.log(agent=self.name, type="start", task=task)
         for turn in range(self.max_turns):
             if self.token_budget and self.trace.total_tokens > self.token_budget:
@@ -123,6 +199,9 @@ class Agent:
                 cache_control={"type": "ephemeral"}, betas=[FALLBACK_BETA], fallbacks="default",
             )
             usage = self.trace.add_usage(self.name, response.usage)
+            output = _output_parts(response.content)
+            self.trace.attribute(self.name, ledger, output, usage)
+            ledger += output
             self.trace.log(agent=self.name, type="model", turn=turn, stop_reason=response.stop_reason,
                            latency_s=round(time.perf_counter() - t0, 2), usage=usage)
             messages.append({"role": "assistant", "content": response.content})
@@ -137,6 +216,7 @@ class Agent:
                 return reply
             with ThreadPoolExecutor(max_workers=len(tool_uses)) as pool:
                 results = list(pool.map(self._execute, tool_uses))
+            ledger += [(b.name, len(r["content"])) for b, r in zip(tool_uses, results)]
             messages.append({"role": "user", "content": results})
         raise AgentError(f"{self.name} did not finish within {self.max_turns} turns.")
 
@@ -145,6 +225,11 @@ class Agent:
         t0 = time.perf_counter()
         ok = False
         try:
+            denied = self.hooks.before(self.name, block.name, block.input) if self.hooks else None
+            if denied:
+                hook, reason = denied
+                self.trace.log(agent=self.name, type="hook_denied", tool=block.name, hook=hook, reason=reason)
+                raise ToolError(f"Denied by the {hook} hook: {reason}")
             if tool is None:
                 raise ToolError(f"Unknown tool {block.name!r}. Available: {sorted(self.tools)}.")
             if not isinstance(block.input, dict):
@@ -163,6 +248,8 @@ class Agent:
         except Exception as exc:  # unexpected: log it, keep the run alive
             content = f"Internal error in {block.name}: {type(exc).__name__}"
             self.trace.log(agent=self.name, type="tool_crash", tool=block.name, error=repr(exc))
+        if self.hooks:
+            self.hooks.after(self.name, block.name, block.input, ok, content)
         self.trace.log(agent=self.name, type="tool", tool=block.name, input=block.input, ok=ok,
                        latency_s=round(time.perf_counter() - t0, 3),
                        error=None if ok else content[:500],

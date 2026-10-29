@@ -1,19 +1,19 @@
-"""Data Agent: fetches SPY, IEF and ^IRX from Yahoo Finance and certifies the dataset."""
+"""Data Agent: fetches the seven-ETF universe and ^IRX from Yahoo Finance and certifies the dataset."""
 
 from strategy.agents.runtime import Agent, Tool, ToolError, schema
-from strategy.config import ALLOWED_TICKERS
+from strategy.config import ALLOWED_TICKERS, UNIVERSE
 from strategy.data import DataError, clean, dataset_hash, fetch_prices, quality_report
 from strategy.paths import write_json, write_text
 
-PROMPT = """You are the Data Agent in an investment research pipeline. You prepare the daily price dataset for two strategies: a trend rotation between SPY (US equities) and IEF (7-10 year Treasuries), and a monthly momentum strategy across SPY, QQQ, TLT, GLD, IWM and IEF.
+PROMPT = """You are the Data Agent at Agentic Capital Management, an AI-run research pipeline. You prepare the daily price dataset for a month-end ETF ranking strategy across {universe}.
 
 Your job:
-1. Fetch adjusted daily closes for SPY, QQQ, TLT, GLD, IWM, IEF and ^IRX (the 13-week T-bill yield, used as the risk-free rate), starting from the requested date. Tickers that launched after the start date (e.g. GLD) begin at their inception, which is expected.
+1. Fetch adjusted daily closes for {universe} and ^IRX (the 13-week T-bill yield, used as the risk-free rate), starting from the requested date.
 2. Run the quality check and read it carefully: missing values, gaps, suspicious jumps, stale prices, implausible yields.
-3. Save the dataset. Saving keeps only days when both ETFs traded, and carries the T-bill yield forward over its own holidays.
+3. Save the dataset. Saving keeps only days when every ETF traded and only completed sessions, and carries the T-bill yield forward over its own holidays.
 4. Reply with a short data note: date range, row count, any issues found and how they were handled, and anything downstream agents should know.
 
-Rules: only the allowed tickers exist for this pipeline. If a fetch fails, retry once, then report the failure clearly. Never invent data or statistics: report only what the tools return."""
+Rules: only the allowed tickers exist for this pipeline. If a fetch fails, retry once, then report the failure clearly. Never invent data or statistics: report only what the tools return.""".format(universe=", ".join(UNIVERSE))
 
 
 def build(ctx):
@@ -61,11 +61,12 @@ def build(ctx):
                      "start": {"type": "string", "description": "YYYY-MM-DD"}}, ["tickers", "start"]), fetch),
         Tool("check_data_quality", "Quality report on the fetched data: missing values, gaps, jumps, stale runs, yield range.",
              schema(), check),
-        Tool("save_dataset", "Clean and save the dataset for the backtest. Requires a quality check first.", schema(), save),
+        Tool("save_dataset", "Clean and save the dataset for the research. Requires a quality check first.", schema(), save),
     ]
     return Agent(ctx.client, "Data Agent", PROMPT, tools, ctx.trace, effort="low",
-                 max_turns=ctx.cfg.max_turns_per_agent, token_budget=ctx.cfg.token_budget, model=ctx.cfg.model)
+                 max_turns=ctx.cfg.max_turns_per_agent, token_budget=ctx.cfg.token_budget, model=ctx.cfg.model,
+                 hooks=ctx.hooks)
 
 
 def task(ctx):
-    return f"Prepare the dataset starting {ctx.cfg.strategy.start} through the latest available close."
+    return f"Prepare the dataset starting {ctx.cfg.ranking.start} through the latest available close."

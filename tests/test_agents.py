@@ -1,81 +1,177 @@
-"""Agent and harness tests with a scripted fake Claude client: no API calls."""
+"""Agent and harness tests with scripted Claude clients: no API calls.
 
-import json
+The end-to-end tests use the shared `offline_run` fixture (all six agents through the real harness);
+the protocol tests call the Research and PM tools directly to probe each rule.
+"""
 
 import pytest
 
 from conftest import FakeClaude, response, text, tool_use
 from fixtures import VALID_TEAM
-from strategy.agents import analytics_agent, backtest_agent, presentation_agent, team_agent
-from strategy.agents.runtime import AgentError, BudgetExceeded, Trace
-from strategy.config import COMPARISON_WINDOWS, PipelineConfig, WINDOWS
+from strategy.agents import (analytics_agent, data_agent, pm_agent, presentation_agent, research_agent, team_agent,
+                             views)
+from strategy.agents.runtime import AgentError, BudgetExceeded, ToolError, Trace
+from strategy.config import PipelineConfig
 from strategy.context import RunContext
-from strategy.harness import StageError, run_stage
+from strategy.harness import run_stage
+from strategy.hooks import default_hooks
+from strategy.ranking import common_start, grid, run_strategy, top_n
 
 
-def make_ctx(workdir, client, prices=None, **cfg):
-    ctx = RunContext(run_dir=workdir, cfg=PipelineConfig(**cfg), trace=Trace(workdir / "trace.jsonl"), client=client)
+def make_ctx(workdir, client=None, prices=None, **cfg):
+    ctx = RunContext(run_dir=workdir, cfg=PipelineConfig(**cfg), trace=Trace(workdir / "trace.jsonl"), client=client,
+                     hooks=default_hooks())
     ctx.prices = prices
     return ctx
 
 
-def tool_results(client, request_idx):
-    return client.requests[request_idx]["messages"][-1]["content"]
+def tool(ctx, module, name, round_=None):
+    """A tool handler of a freshly built agent (round-aware)."""
+    agent = module.build(ctx) if round_ is None else module.build(ctx, round_)
+    return agent.tools[name].handler
 
 
-def test_backtest_agent_must_run_every_candidate(workdir, prices):
-    client = FakeClaude(
-        response(tool_use("a", "run_ma_backtest", ma_days=50), tool_use("b", "run_walk_forward"), stop="tool_use"),
-        response(tool_use("c", "compare_candidates"), stop="tool_use"),
-        response(tool_use("d", "save_backtest", methodology_summary="Walk-forward."), stop="tool_use"),
-        response(text("Saved.")),
-    )
-    ctx = make_ctx(workdir, client, prices)
-    with pytest.raises(StageError):
-        run_stage(ctx, "backtest")
-    save_result = tool_results(client, 3)[0]
-    assert save_result["is_error"] and "missing MA [5, 20, 200]" in save_result["content"]
+@pytest.fixture
+def round1_ctx(workdir, prices):
+    """A context after the Research Agent's round 1 (grid run and saved)."""
+    ctx = make_ctx(workdir, prices=prices)
+    tool(ctx, research_agent, "run_grid", 1)()
+    tool(ctx, research_agent, "save_research", 1)(
+        round=1, message_to_pm="Done.", findings=["Pro: a.", "Pro: b.", "Con: c.", "Con: d."])
+    return ctx
 
 
-def full_backtest_script():
-    return [
-        response(*[tool_use(f"m{n}", "run_ma_backtest", ma_days=n) for n in (5, 20, 50, 200)],
-                 *[tool_use(f"mom{L}", "run_momentum", lookback_months=L) for L in (1, 3, 6, 12, 24)],
-                 tool_use("wf", "run_walk_forward"), stop="tool_use"),
-        response(tool_use("c", "compare_candidates"), stop="tool_use"),
-        response(tool_use("s", "save_backtest", methodology_summary="Walk-forward selection."), stop="tool_use"),
-        response(text("Backtest saved.")),
-    ]
+# ------------------------------------------------------------------ end to end
+
+def test_pipeline_runs_every_stage_and_writes_every_artifact(offline_run):
+    ctx = offline_run
+    for name in ("prices.csv", "research.json", "strategy_returns.csv", "pm.json", "dialogue.json", "analytics.json",
+                 "team.json", "deck.json", "presentation.pdf", "manifest.json", "trace.jsonl"):
+        assert ctx.path(name).exists(), name
+    assert {e["agent"] for e in ctx.trace.events() if e.get("type") == "finish"} >= {
+        "Data Agent", "Research Agent", "Portfolio Manager Agent", "Analytics Agent", "Team Agent", "Presentation Agent"}
 
 
-def test_backtest_then_analytics_findings_are_number_checked(workdir, prices):
-    ctx = make_ctx(workdir, FakeClaude(*full_backtest_script()), prices)
-    run_stage(ctx, "backtest")
-    assert ctx.path("backtest.json").exists() and ctx.path("returns.csv").exists()
+def test_pm_loop_follows_the_rules(offline_run):
+    ctx = offline_run
+    assert [p["id"] for p in ctx.pm["top5"]] == top_n(ctx.scores, 5, ctx.research[1]["ids"])
+    assert len(ctx.pm["proposals"]) == 5
+    assert len(ctx.pm["final"]["final"]) == 5
+    assert [d["from"] for d in ctx.dialogue] == ["Research Agent", "Portfolio Manager Agent", "Research Agent",
+                                                 "Portfolio Manager Agent"]
 
-    assert ctx.path("momentum.json").exists() and "MOM12" in ctx.returns.columns
 
-    sharpe = round(ctx.backtest["candidates_in_sample"]["MA200"]["sharpe"], 2)  # any real number
-    good = ["Finding one is qualitative.", "Drawdowns were smaller in stress periods.",
-            f"The 200-day rule had an in-sample Sharpe of {sharpe:.2f}.", "It lagged in strong rallies.",
-            "Momentum lookbacks differ in how often they rebalance vs QQQ.", "Longer momentum lookbacks hold positions longer."]
-    no_momentum = good[:4] + ["Another general finding."]
-    ctx.client = FakeClaude(
-        response(*[tool_use(f"w{w}", "compute_metrics", window=w) for w in WINDOWS],
-                 *[tool_use(f"c{w}", "compute_comparison", window=w) for w in COMPARISON_WINDOWS],
-                 tool_use("r", "rolling_analysis"), stop="tool_use"),
-        response(tool_use("bad", "save_analytics", findings=good + ["It beat SPY by 87.65% per year."]), stop="tool_use"),
-        response(tool_use("nomom", "save_analytics", findings=no_momentum), stop="tool_use"),
-        response(tool_use("ok", "save_analytics", findings=good), stop="tool_use"),
-        response(text("Saved.")),
-    )
-    run_stage(ctx, "analytics")
-    rejected = tool_results(ctx.client, 2)[0]
-    assert rejected["is_error"] and "87.65%" in rejected["content"]
-    assert "momentum" in tool_results(ctx.client, 3)[0]["content"]
-    assert ctx.analytics["findings"] == good
-    assert set(ctx.analytics["comparison"]["windows"]) == set(COMPARISON_WINDOWS)
+def test_all_strategies_scored_on_identical_dates(offline_run):
+    ctx = offline_run
+    ids = [c for c in ctx.returns.columns if c in ctx.specs]
+    assert len(ids) == 89
+    assert ctx.returns[ids].notna().all().all()
 
+
+# ------------------------------------------------------------------ Research Agent
+
+def test_research_round1_tools(round1_ctx):
+    ctx = round1_ctx
+    assert len(ctx.research[1]["ids"]) == 84
+    assert ctx.window_start == common_start({s.id: run_strategy(ctx.prices[list(ctx.cfg.ranking.universe)], s)[0]
+                                             for s in grid(ctx.cfg.ranking)})
+    detail = tool(ctx, research_agent, "strategy_detail", 1)(id="T1-SMA20-15d")
+    assert set(detail["share_of_months_each_etf_led"]) <= set(ctx.cfg.ranking.universe)
+    assert "T1-SMA20-15d" in ctx.facts["leader_share"]
+
+
+def test_research_findings_need_pros_cons_and_real_numbers(workdir, prices):
+    ctx = make_ctx(workdir, prices=prices)
+    tool(ctx, research_agent, "run_grid", 1)()
+    save = tool(ctx, research_agent, "save_research", 1)
+    with pytest.raises(ToolError, match="Pro:"):
+        save(round=1, message_to_pm="x", findings=["a", "b", "c", "d"])
+    with pytest.raises(ToolError, match="not found"):
+        save(round=1, message_to_pm="It returned 987.6%.", findings=["Pro: a.", "Pro: b.", "Con: c.", "Con: d."])
+
+
+def test_research_round2_only_runs_pm_proposals(round1_ctx):
+    ctx = round1_ctx
+    ids = top_n(ctx.scores, 5, ctx.research[1]["ids"])
+    tool(ctx, pm_agent, "get_results", 1)(round=1)
+    tool(ctx, pm_agent, "select_top5", 1)(picks=[{"id": i, "rationale": "r.", "pro": "p.", "con": "c."} for i in ids])
+    props = [{"portfolio": "Top 1", "sma": s, "lookback_days": d, "hypothesis": "h.", "pro": "p.", "con": "c."}
+             for s, d in ((20, 10), (10, 15), (30, 20), (40, 25), (60, 45))]
+    tool(ctx, pm_agent, "propose_strategies", 1)(proposals=props, message_to_research="Run these.")
+    run = tool(ctx, research_agent, "run_strategy", 2)
+    with pytest.raises(ToolError, match="not one of"):
+        run(portfolio="Top 3 mix", sma=20, lookback_days=10)
+    out = run(portfolio="Top 1", sma=20, lookback_days=10)
+    assert out["id"] == "T1-SMA20-10d" and "beats_weakest_top" in out
+    with pytest.raises(ToolError, match="Run every proposal"):
+        tool(ctx, research_agent, "save_research", 2)(round=2, message_to_pm="x",
+                                                       findings=["Pro: a.", "Pro: b.", "Con: c.", "Con: d."])
+
+
+# ------------------------------------------------------------------ Portfolio Manager Agent
+
+def test_pm_must_pick_the_true_top5(round1_ctx):
+    ctx = round1_ctx
+    tool(ctx, pm_agent, "get_results", 1)(round=1)
+    wrong = top_n(ctx.scores, 6, ctx.research[1]["ids"])[1:]
+    with pytest.raises(ToolError, match="not"):
+        tool(ctx, pm_agent, "select_top5", 1)(picks=[{"id": i, "rationale": "r.", "pro": "p.", "con": "c."} for i in wrong])
+
+
+def test_pm_proposals_validated(round1_ctx):
+    ctx = round1_ctx
+    tool(ctx, pm_agent, "get_results", 1)(round=1)
+    ids = top_n(ctx.scores, 5, ctx.research[1]["ids"])
+    tool(ctx, pm_agent, "select_top5", 1)(picks=[{"id": i, "rationale": "r.", "pro": "p.", "con": "c."} for i in ids])
+    propose = tool(ctx, pm_agent, "propose_strategies", 1)
+
+    def props(*specs):
+        return [{"portfolio": p, "sma": s, "lookback_days": d, "hypothesis": "h.", "pro": "p.", "con": "c."}
+                for p, s, d in specs]
+    ok = [("Top 1", 20, 10), ("Top 1", 10, 15), ("Top 1", 30, 20), ("Top 1", 40, 25)]
+    with pytest.raises(ToolError, match="already run"):
+        propose(proposals=props(*ok, ("Top 1", 20, 15)), message_to_research="x")
+    with pytest.raises(ToolError, match="more history"):
+        propose(proposals=props(*ok, ("Top 1", 250, 365)), message_to_research="x")
+    with pytest.raises(ToolError, match="exactly 5"):
+        propose(proposals=props(*ok), message_to_research="x")
+    # a proposal may cite its own parameters ("a 40-day SMA over 25 days"), but not invented statistics
+    with pytest.raises(ToolError, match="not found"):
+        propose(proposals=props(*ok, ("Top 1", 60, 45)), message_to_research="These should return 54.3%.")
+    assert propose(proposals=props(*ok, ("Top 1", 60, 45)), message_to_research="Try a 60-day SMA over 45 days.")
+
+
+def test_meeting_rules(offline_run):
+    ctx = offline_run
+    write = tool(ctx, pm_agent, "write_meeting", 2)
+    good = ctx.pm["meeting"]
+    with pytest.raises(ToolError, match="lines"):
+        write(lines=good[:5])
+    with pytest.raises(ToolError, match="at least twice"):
+        write(lines=[{"speaker": "Portfolio Manager Agent", "text": line["text"]} for line in good])
+    with pytest.raises(ToolError, match="cover"):
+        write(lines=[{**line, "text": "We met."} for line in good])
+    write(lines=good)
+
+
+def test_feedback_rules(offline_run):
+    """User request: a constructive page (correlation, returns, macro basket) and a harsh page built on real cons."""
+    ctx = offline_run
+    write = tool(ctx, pm_agent, "write_feedback", 2)
+    good = ctx.pm["feedback"]
+    with pytest.raises(ToolError, match="must cover"):
+        write(constructive=[{**line, "text": "Nice work."} for line in good["constructive"]], harsh=good["harsh"])
+    with pytest.raises(ToolError, match="real cons"):
+        write(constructive=good["constructive"], harsh=[{**line, "text": "You are sloppy."} for line in good["harsh"]])
+    with pytest.raises(ToolError, match="lines"):
+        write(constructive=good["constructive"][:3], harsh=good["harsh"])
+    with pytest.raises(ToolError, match="not found"):
+        write(constructive=good["constructive"], harsh=[*good["harsh"][:-1],
+                                                        {"speaker": "Research Agent", "text": "We lost 99.9% of it."}])
+    write(constructive=good["constructive"], harsh=good["harsh"])
+
+
+# ------------------------------------------------------------------ runtime
 
 def test_team_agent_retries_after_validation_error(workdir):
     bad = [dict(m) for m in VALID_TEAM]
@@ -87,206 +183,8 @@ def test_team_agent_retries_after_validation_error(workdir):
     )
     ctx = make_ctx(workdir, client)
     run_stage(ctx, "team")
-    assert "real firm" in tool_results(client, 1)[0]["content"]
+    assert "real firm" in client.requests[1]["messages"][-1]["content"][0]["content"]
     assert len(ctx.team["members"]) == 6 and ctx.path("team.json").exists()
-
-
-@pytest.fixture
-def ready_ctx(workdir, prices):
-    """A context with backtest, analytics and team done, ready for the Presentation Agent."""
-    ctx = make_ctx(workdir, FakeClaude(*full_backtest_script()), prices)
-    run_stage(ctx, "backtest")
-    ctx.client = FakeClaude(
-        response(*[tool_use(f"w{w}", "compute_metrics", window=w) for w in WINDOWS],
-                 *[tool_use(f"c{w}", "compute_comparison", window=w) for w in COMPARISON_WINDOWS],
-                 tool_use("r", "rolling_analysis"), stop="tool_use"),
-        response(tool_use("s", "save_analytics", findings=["A.", "B.", "C.", "Momentum one vs QQQ.", "Momentum two."]),
-                 stop="tool_use"),
-        response(text("ok")),
-    )
-    run_stage(ctx, "analytics")
-    from strategy.team import validate_team
-    ctx.team, _ = validate_team(VALID_TEAM)
-    return ctx
-
-
-def test_presentation_agent_guardrails_and_pdf(ready_ctx):
-    from strategy.agents.presentation_agent import METRIC_WORDS, WINDOW_WORDS
-    from strategy.analytics import adverse_windows
-    ctx = ready_ctx
-    spy_mdd = ctx.analytics["windows"]["SI"]["series"]["SPY"]["max_drawdown"]
-    adverse = adverse_windows(ctx.analytics)
-    acknowledgements = [f"Over the {WINDOW_WORDS[a['window']][1]} window the strategy had a weaker "
-                        f"{' and '.join(METRIC_WORDS[m][0] for m in a['worse_on'])} than {a['vs']}." for a in adverse][:6]
-    slides = [tool_use(f"s{c}", "add_slide", title=f"Slide {c}", bullets=["Disciplined, rules-based allocation."])
-              for c in "ABCD"]
-    from strategy.agents.presentation_agent import CON_WORDS
-    from strategy.analytics import momentum_adverse
-    mom_slides = []
-    for L in (1, 3, 6, 12, 24):
-        cons = [f"Con: weaker {CON_WORDS[m][0]} than SPY since 2011." for m in momentum_adverse(ctx.analytics["comparison"])[f"MOM{L}"]]
-        mom_slides.append(tool_use(f"mom{L}", "add_slide", title=f"{L}-Month Momentum: Pros and Cons",
-                                   bullets=["Pro: Rotates into the strongest asset.", *cons,
-                                            "Con: always fully invested, no defensive exit."]))
-    ctx.client = FakeClaude(
-        response(tool_use("l", "list_metrics"),
-                 *[tool_use(f"c{k}", "render_chart", kind=k)
-                   for k in ("equity_vs_spy", "drawdowns", "momentum_vs_benchmarks", "momentum_allocations")], stop="tool_use"),
-        # violation: invented number and promissory language
-        response(tool_use("bad", "add_slide", title="Why invest", bullets=["Guaranteed 99.9% upside."]), stop="tool_use"),
-        response(tool_use("p1", "add_slide", title="Performance vs SPY", bullets=["Growth of $10,000 shown."],
-                          chart="equity_vs_spy"),
-                 tool_use("p2", "add_slide", title="Drawdown protection",
-                          bullets=[f"SPY's worst drawdown was {abs(spy_mdd) * 100:.1f}%."], chart="drawdowns"),
-                 *slides, stop="tool_use"),
-        response(tool_use("early", "build_pdf"), stop="tool_use"),
-        response(tool_use("mv", "add_slide", title="Momentum Since January", bullets=["Six-ETF rotation."],
-                          chart="momentum_vs_benchmarks"),
-                 tool_use("mh", "add_slide", title="What Momentum Held", bullets=["Holdings by lookback."],
-                          chart="momentum_allocations"),
-                 *mom_slides,
-                 tool_use("cmp", "add_slide", title="Momentum vs MA Strategy vs SPY and QQQ",
-                          bullets=["Compares momentum with the MA strategy, SPY and QQQ; momentum excludes costs."]),
-                 tool_use("sum", "add_slide", title="Executive Summary",
-                          bullets=["Verdict: how momentum and the MA strategy compared with SPY."]),
-                 *[tool_use(f"sp{p}", "add_standard_page", page=p)
-                   for p in ("metrics_table", "in_sample_comparison", "comparison_table", "momentum_supporting", "team")],
-                 stop="tool_use"),
-        response(tool_use("b", "build_pdf"), stop="tool_use"),
-        *([] if not adverse else [
-            response(tool_use("tradeoffs", "add_slide", title="Trade-offs", bullets=acknowledgements), stop="tool_use"),
-            response(tool_use("b2", "build_pdf"), stop="tool_use")]),
-        response(text("Deck built.")),
-    )
-    run_stage(ctx, "presentation")
-    if adverse:   # first build_pdf was blocked by the balance check, then succeeded after acknowledging
-        blocked = tool_results(ctx.client, 6)[0]
-        assert blocked["is_error"] and "Balance check failed" in blocked["content"]
-
-    bad = tool_results(ctx.client, 2)[0]
-    assert bad["is_error"] and "99.9%" in bad["content"] and "guarantee" in bad["content"].lower()
-    early = tool_results(ctx.client, 4)[0]
-    assert early["is_error"] and "at least 11 slides" in early["content"]
-    assert ctx.path("presentation.pdf").exists()
-    perf = {s["title"]: s["performance"] for s in ctx.slides if s["type"] == "slide"}
-    # Disclosure is decided by code: charts or any digit -> performance footer.
-    assert perf["Performance vs SPY"] and perf["Drawdown protection"] and not perf["Slide A"]
-
-
-def test_every_citable_percentage_is_traceable_in_pdf(ready_ctx):
-    """Traceability by construction: every percentage the Presentation Agent can see in list_metrics
-    must appear in the code-generated pages, so any figure it cites can be found by a reader."""
-    import re
-    from pypdf import PdfReader
-    from strategy.agents.presentation_agent import build as build_presentation, render_deck
-    ctx = ready_ctx
-    tools = build_presentation(ctx).tools
-    shown = json.dumps(tools["list_metrics"].handler())
-    citable = set(re.findall(r"-?\d+\.\d%", shown))
-    ctx.slides = [{"type": p} for p in ("metrics_table", "in_sample_comparison", "comparison_table",
-                                         "momentum_supporting", "team")]
-    pdf = render_deck(ctx)
-    text = " ".join(p.extract_text() for p in PdfReader(str(pdf)).pages)
-    missing = sorted(v for v in citable if v not in text)
-    assert not missing, f"Citable but not shown in any table: {missing[:20]}"
-
-
-def test_momentum_section_requirements(ready_ctx):
-    """Each lookback needs a Pro/Con slide whose Cons cover where it lagged SPY, plus a comparison slide."""
-    from strategy.agents.presentation_agent import momentum_section_problems
-    from strategy.analytics import momentum_adverse
-    a = ready_ctx.analytics
-    slide = lambda title, *b: {"type": "slide", "title": title, "bullets": list(b), "chart": None}
-    problems = momentum_section_problems(a, [slide("3-Month Momentum", "Pro: fast.")], (1, 3, 6, 12, 24))
-    assert any("6-Month" in p for p in problems) and any("Pro:" in p for p in problems)
-    assert any("comparison slide" in p for p in problems)
-
-    adverse = momentum_adverse(a["comparison"])
-    complete = [slide(f"{L}-Month Momentum", "Pro: adapts.",
-                      *[f"Con: weaker {'drawdown' if m == 'max_drawdown' else m} than SPY." for m in adverse[f"MOM{L}"]],
-                      "Con: concentrated; always fully invested with no defensive exit.")
-                for L in (1, 3, 6, 12, 24)]
-    complete.append(slide("Momentum vs MA Strategy vs SPY and QQQ", "Momentum compared with the trend strategy, SPY and QQQ."))
-    assert any("Executive Summary" in p for p in momentum_section_problems(a, complete, (1, 3, 6, 12, 24)))
-    complete.append(slide("Executive Summary", "Verdict: momentum vs the MA strategy vs SPY since 2011."))
-    assert momentum_section_problems(a, complete, (1, 3, 6, 12, 24)) == []
-    # Dropping a required Con is caught.
-    lagging = next((L for L in (1, 3, 6, 12, 24) if adverse[f"MOM{L}"]), None)
-    if lagging:
-        idx = (1, 3, 6, 12, 24).index(lagging)
-        complete[idx] = slide(f"{lagging}-Month Momentum", "Pro: adapts.", "Con: always fully invested.")
-        assert any(f"{lagging}-month" in p for p in momentum_section_problems(a, complete, (1, 3, 6, 12, 24)))
-
-
-def test_no_cash_language_when_always_invested(ready_ctx):
-    """v3: momentum is always fully invested, so no momentum slide may describe cash (accurate negations are fine)."""
-    from strategy.agents.presentation_agent import momentum_section_problems
-    slide = lambda title, *b: {"type": "slide", "title": title, "bullets": list(b), "chart": None}
-    bad = [slide("3-Month Momentum: Pros and Cons", "Con: it moves to cash after losses.")]
-    ok = [slide("3-Month Momentum: Pros and Cons", "Pro: always fully invested, never in cash.")]
-    flag = lambda slides, cr: [p for p in momentum_section_problems(ready_ctx.analytics, slides, (3,), cash_rules=cr)
-                               if "mentions cash" in p]
-    assert flag(bad, False) and not flag(ok, False)
-    assert not flag(bad, True)                      # with cash rules (v2), describing cash is legitimate
-    # Regression: this accurate sentence from a live run was wrongly rejected, and the agent couldn't recover.
-    from strategy.agents.presentation_agent import CASH_WORD_RE
-    live = "Always fully invested, even when trailing returns are negative; it never holds cash and has no defensive mechanism."
-    assert not CASH_WORD_RE.search(live)
-    assert not CASH_WORD_RE.search("It does not move to cash.") and not CASH_WORD_RE.search("without moving into cash")
-    assert CASH_WORD_RE.search("It rotates into cash after losses.")
-    assert CASH_WORD_RE.search("No leverage is used; it moves to cash in sell-offs.")   # negation elsewhere
-
-
-def test_revise_slide_replaces_in_place_with_same_guardrails(ready_ctx):
-    """Regression: with append-only slides, a build_pdf rejection about an earlier slide was unrecoverable."""
-    from strategy.agents.presentation_agent import build as build_presentation
-    ctx = ready_ctx
-    tools = build_presentation(ctx).tools
-    tools["add_slide"].handler("Overview", ["First version."])
-    tools["add_slide"].handler("Next Steps", ["Request the methodology."])
-    out = tools["revise_slide"].handler("Overview", "Overview (revised)", ["Second version."])
-    assert out["position"] == 2 and [s["title"] for s in ctx.slides][:2] == ["Overview (revised)", "Next Steps"]
-    from strategy.agents.runtime import ToolError
-    with pytest.raises(ToolError, match="guardrails"):
-        tools["revise_slide"].handler("Overview (revised)", "Overview", ["Returns are guaranteed."])
-    with pytest.raises(ToolError, match="No slide titled"):
-        tools["revise_slide"].handler("Missing", "X", ["Y."])
-
-
-def test_always_invested_momentum_not_pitched_as_defensive(ready_ctx):
-    """Regression (v3 review): decks said both strategies 'aim to reduce drawdowns' although momentum has no
-    defensive rule, and some lookback slides omitted the no-protection con."""
-    from strategy.agents.presentation_agent import DEFENSIVE_CLAIM_RE, momentum_section_problems
-    slide = lambda title, *b: {"type": "slide", "title": title, "bullets": list(b), "chart": None}
-    probs = lambda slides: momentum_section_problems(ready_ctx.analytics, slides, (3,), cash_rules=False)
-    claims = [slide("Executive Summary", "Both are tactical allocations aimed at shallower drawdowns."),
-              slide("Why Momentum", "The case for momentum rests on drawdown.")]
-    assert sum("design aim" in p for p in probs(claims)) == 2
-    ma_only = [slide("How the MA Strategy Works", "The MA strategy aims to reduce drawdowns by switching to IEF.")]
-    assert not any("design aim" in p for p in probs(ma_only))
-    observed = [slide("Momentum Drawdowns", "Momentum's 3-month drawdown was shallower than SPY's (observed).")]
-    assert not any("design aim" in p for p in probs(observed))
-    no_con = [slide("3-Month Momentum: Pros and Cons", "Pro: strong.", "Con: trails SPY.")]
-    assert any("no defensive" in p for p in probs(no_con))
-    with_con = [slide("3-Month Momentum: Pros and Cons", "Pro: strong.", "Con: always fully invested, no defensive exit.")]
-    assert not any("no defensive" in p for p in probs(with_con))
-    assert DEFENSIVE_CLAIM_RE.search("Both strategies aim to reduce drawdowns systematically.")
-
-
-def test_momentum_slides_cannot_acknowledge_ma_weaknesses():
-    """Regression: '12-Month Momentum' + 'Con: lower Sharpe than SPY' must not count as acknowledging the
-    MA strategy's 1-year Sharpe shortfall (the title contains a 1Y window synonym)."""
-    from strategy.agents.presentation_agent import unacknowledged_adverse
-    a = {"windows": {"1Y": {"series": {"Strategy": {"max_drawdown": -0.05, "sharpe": 0.7},
-                                       "SPY": {"max_drawdown": -0.09, "sharpe": 1.0}}}}}
-    mom = {"type": "slide", "title": "12-Month Momentum: Pros and Cons", "bullets": ["Con: lower Sharpe than SPY."]}
-    assert unacknowledged_adverse(a, [mom]) == ["1Y vs SPY sharpe"]
-    lookback = {"type": "slide", "title": "12-Month Lookback: Pros and Cons", "bullets": ["Con: lower Sharpe than SPY."]}
-    assert unacknowledged_adverse(a, [lookback]) == ["1Y vs SPY sharpe"]      # live runs used this title style
-    ma = {"type": "slide", "title": "When the MA Strategy Lags", "bullets": ["1Y: lower Sharpe than SPY (0.70 vs 1.00)."]}
-    assert unacknowledged_adverse(a, [mom, lookback, ma]) == []
-    period = {"type": "slide", "title": "MA Strategy Performance by Period: 3M, 1Y", "bullets": ["1Y Sharpe below SPY."]}
-    assert unacknowledged_adverse(a, [period]) == []                          # MA slides still count
 
 
 def test_turn_limit_and_budget(workdir):
@@ -307,7 +205,16 @@ def test_trace_and_cost(workdir):
     assert ctx.trace.cost_usd() == pytest.approx((100 * 4 + 20 * 20) / 1e6)
 
 
-def test_all_agents_use_the_configured_model(workdir):
-    for module in (backtest_agent, analytics_agent, presentation_agent, team_agent):
-        agent = module.build(make_ctx(workdir, None))
-        assert agent.model == "claude-opus-5-5"
+def test_all_agents_use_the_configured_model_and_hooks(workdir, prices):
+    ctx = make_ctx(workdir, prices=prices)
+    builders = [data_agent.build, team_agent.build, analytics_agent.build, presentation_agent.build,
+                lambda c: research_agent.build(c, 1), lambda c: research_agent.build(c, 2),
+                lambda c: pm_agent.build(c, 1), lambda c: pm_agent.build(c, 2)]
+    for build in builders:
+        agent = build(ctx)
+        assert agent.model == "claude-opus-5-5" and agent.hooks is ctx.hooks
+
+
+def test_views_row_is_display_rounded(offline_run):
+    row = views.row(offline_run, "SPY")
+    assert row["total_return"].endswith("%") and row["sharpe"].count(".") == 1

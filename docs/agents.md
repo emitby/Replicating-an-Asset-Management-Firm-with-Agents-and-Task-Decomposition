@@ -1,34 +1,54 @@
 # Agents
 
-Five Claude agents (`claude-opus-5-5`, adaptive thinking, server-side refusal fallbacks). Each one:
+Six Claude agents (`claude-opus-5-5`). Each one:
 
-- has a focused system prompt and a **least-privilege tool set**. No agent can touch another stage's data, the filesystem or the network directly.
-- works through **deterministic tools that compute every number**. The agent decides what to run and how to explain it.
-- gets tool errors back as `is_error` results, so it can correct itself. Preconditions are enforced in code, e.g. "check quality before saving" or "backtest every MA before saving".
-- runs under a turn limit and the run-wide token budget, and every model call and tool call is traced.
+- has one system prompt and a fixed set of tools;
+- runs through the same loop (`agents/runtime.py`), with tool hooks, a turn limit, a run-wide token budget, and tracing of every call;
+- sees only rounded, display-ready numbers (`agents/display.py`: percentages to 1 decimal, ratios to 2). The guardrails accept exactly these roundings, or coarser ones.
 
-| Agent | Effort | Tools | Preconditions enforced in code | Artifact |
-|---|---|---|---|---|
-| **Data** | low | `fetch_prices`, `check_data_quality`, `save_dataset` | Ticker allowlist (SPY, QQQ, TLT, GLD, IWM, IEF, ^IRX) and date range. Quality check before saving. Enough history for 24-month lookbacks before 2011. | `prices.csv`, `data_report.json` |
-| **Backtest** | low | `run_ma_backtest`, `run_walk_forward`, `compare_candidates`, `run_momentum`, `save_backtest` | All 4 MAs, the walk-forward, the comparison and **all 5 momentum lookbacks** (50/30/20 top-three) before saving. Parameters fixed by config. | `backtest.json`, `momentum.json`, `returns.csv` |
-| **Analytics** | medium | `compute_metrics`, `rolling_analysis`, `compute_comparison`, `save_analytics` | All 5 MA windows, the rolling analysis and all 5 **comparison windows** (3M/1Y/3Y/5Y/since 2011) before saving. 5–9 findings, at least 2 on momentum and 1 vs QQQ, **every number verified**. | `analytics.json` |
-| **Team** | low | `submit_team` | Schema, 1 PM + 5 analysts, certification allowlist, fictional employers, no famous names | `team.json` |
-| **Presentation** | medium | `list_metrics`, `get_team`, `render_chart`, `add_slide`, `revise_slide`, `add_standard_page`, `build_pdf` | Each slide checked by guardrails when added or revised (`revise_slide` replaces a slide in place, so a rejected claim can be fixed). 11–22 slides. Required charts and 5 standard pages. **A Pro/Con slide per lookback (5) covering its weaknesses vs SPY, a comparison slide vs SPY and QQQ, an Executive Summary verdict**, and MA/60/40 acknowledgements. Under v3 (always invested): no cash language for momentum, no claim that it is designed to limit drawdowns, and a no-defense Con per lookback. All checked before the build. | `presentation.pdf`, `slides.json`, `charts/` |
+| Agent | Effort | Why an LLM | Tools |
+|---|---|---|---|
+| **Data Agent** | low | Reads the quality report and decides what is a real problem | `fetch_prices`, `check_data_quality`, `save_dataset` |
+| **Research Agent** (2 rounds) | medium | Decides what to examine, interprets 84 results, writes findings with pros and cons for the PM | Round 1: `run_grid`, `strategy_detail`, `save_research`. Round 2: `get_proposals`, `run_strategy`, `strategy_detail`, `save_research` |
+| **Portfolio Manager Agent** (2 rounds) | medium | Judges the trade-offs, designs the 5 new parameter sets, explains each decision, writes the meeting | Round 1: `get_results`, `strategy_detail`, `select_top5`, `propose_strategies`. Round 2: `get_results`, `strategy_detail`, `finalize`, `write_meeting` |
+| **Analytics Agent** | medium | Chooses and writes the findings an investment committee reads | `compute_metrics`, `calendar_and_growth`, `portfolio_fit`, `save_analytics` |
+| **Team Agent** | low | Invents a credible, varied fictional team | `submit_team` |
+| **Presentation Agent** | medium | Writes the narrative, including the positive diversification section | `list_metrics`, `get_dialogue`, `get_team`, `render_chart`, `add_slide`, `revise_slide`, `build_deck` |
 
-## Why every agent uses an LLM, and what it adds
+## What each agent decides vs what code decides
 
-The numbers are deterministic either way. The LLM adds judgment:
+| Decision | Agent | Code |
+|---|---|---|
+| Which strategies to look at closely | Research, PM | |
+| Which 5 are "top" | PM names them | `ranking.top_n` must agree, or the call is rejected |
+| What to test next | PM proposes | `validate_proposal` plus a history check reject duplicates, out-of-range or too-short-history sets |
+| Which new strategies replace which | PM explains | `ranking.apply_replacement` decides |
+| Every number | | Computed by tools; text is checked against them |
+| Slide wording and order within sections | Presentation | Section limits, required topics, required charts, ≤ 2 table pages |
 
-- **Data:** interprets the quality report and writes the data note for downstream stages.
-- **Backtest:** runs and cross-checks the candidates and explains the selection behavior.
-- **Analytics:** decides what matters across windows and writes balanced findings for an investment committee.
-- **Team:** writes credible, varied, role-appropriate personas.
-- **Presentation:** chooses the narrative, charts and order, and writes persuasive but compliant copy.
+## The Research ↔ PM dialogue
 
-## Display rounding contract
+Each `save_research`, `propose_strategies` and `finalize` call appends a message to `ctx.dialogue`, which is saved as `dialogue.json`:
 
-Tools return **display-ready values**: percentages to 1 decimal (`"12.3%"`), ratios to 2 (`0.85`), dollars rounded (`"$48,214"`). The prompts tell agents to quote values as displayed or rounded further, and never to compute differences. The faithfulness guardrail accepts a number only if it equals a stored full-precision value at the precision the text uses. For example, 12.345% may be written as "12.3%" or "12%", but not as "12.4%".
+| From | To | Round | Content |
+|---|---|---|---|
+| Research Agent | Portfolio Manager Agent | 1 | Findings with ≥ 2 pros and ≥ 2 cons |
+| Portfolio Manager Agent | Research Agent | 1 | Top 5 with rationale, pro and con; 5 proposals with hypothesis, pro and con |
+| Research Agent | Portfolio Manager Agent | 2 | Findings on the proposals |
+| Portfolio Manager Agent | All agents | 2 | Every final and removed strategy with rationale, pro and con |
+
+The PDF renders this as the decision log. The PM's task message in each round includes the Research Agent's latest message, which is how the hand-off travels.
+
+## The simulated meeting
+
+`write_meeting` accepts 8–14 lines from the PM, Research and Analytics agents, and each must speak at least twice. The script must:
+
+- cover what is being compared, the objective, SPY and risk;
+- fit one page;
+- pass the numeric and compliance checks.
+
+The PDF labels it a simulated conversation in its title and subtitle, and in the disclosures.
 
 ## Prompts
 
-Each agent's prompt lives in its own module under [`strategy/agents/`](../strategy/agents/). The prompts state the job, the steps, and the rules that code also enforces, so the model knows the constraints rather than discovering them through rejections.
+Prompts live next to each agent's tools in `strategy/agents/*_agent.py`. Rules that matter are also enforced in code; the prompt states them so the agent complies on the first try. One rule was added after a visual review found an agent attaching one strategy's figure to another: name the strategy every figure belongs to, and use the true minimum and maximum for ranges.

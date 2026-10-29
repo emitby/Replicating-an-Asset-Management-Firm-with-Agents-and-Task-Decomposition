@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "spy-ief-strategy"
 version = "0.1.0"
-description = "Five Claude agents research, backtest, analyze and pitch a SPY/IEF moving-average rotation strategy"
+description = "Agentic Capital Management: six Claude agents research, select (Research <-> Portfolio Manager loop) and pitch a month-end ETF ranking strategy"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+notebook = ["ipykernel>=6.29", "jinja2>=3.1"]  # download_prices.ipynb: Jupyter kernel, pandas .style tables
 
 [tool.setuptools.packages.find]
 include = ["strategy*", "evals*"]

@@ -4,11 +4,10 @@ Agents see percentages to 1 decimal and ratios to 2. The guardrails accept
 exactly these roundings, or coarser ones, of the stored full-precision values.
 """
 
-PCT_KEYS = {"total_return", "cagr", "volatility", "max_drawdown", "hit_rate", "best_day", "worst_day",
-            "up_capture", "down_capture", "pct_time_in_spy", "current_allocation_spy",
-            "pct_periods_beating_spy", "worst_1y_strategy", "worst_1y_spy", "best_1y_strategy", "best_1y_spy",
-            "median_1y_excess"}
-RATIO_KEYS = {"sharpe", "sortino", "calmar", "beta", "correlation"}
+PCT_KEYS = {"total_return", "excess_vs_spy", "median_total_return", "cagr", "volatility", "max_drawdown",
+            "hit_rate", "best_day", "worst_day", "up_capture", "down_capture", "added_total_return",
+            "removed_total_return", "blend_weight", "worst_year", "best_year"}
+RATIO_KEYS = {"sharpe", "sortino", "calmar", "beta", "correlation", "corr_spy"}
 
 
 def show(value, key):

@@ -52,7 +52,7 @@ def main(live=False, run=None, trials=1):
             all_pass &= s.passed
             print(f"  {'PASS' if s.passed else 'FAIL'}  {s.name:<26} {s.score:6.1%}  (threshold {s.threshold:.0%})")
             if not s.passed:
-                failed = {k: v for k, v in s.details.items() if v is False or k in ("error", "unsupported", "violations", "mismatches")}
+                failed = {k: v for k, v in s.details.items() if v is False or k in ("error", "unsupported", "mismatched", "leaked", "banned", "personas")}
                 print(f"        {failed}")
 
     red = run_cases()

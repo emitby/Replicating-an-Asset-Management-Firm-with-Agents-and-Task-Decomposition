@@ -1,101 +1,94 @@
 # Results
 
-All results are **hypothetical backtests** with data through the last completed session, **2026-10-16**. They're reproducible from the saved prices: the `backtest_reproducible` and `momentum_reproducible` scorers and the standalone `evals/crosscheck_momentum.py` check this. The full deck is in [example/presentation.pdf](example/presentation.pdf).
+All results are **hypothetical, in-sample backtests** with no trading costs. They cover the common window **2016-05-02 to 2026-10-28** (the last completed session). They come from the example run `20261029-092959-eval1`, whose deck is [example/presentation.pdf](example/presentation.pdf). The scorers `research_reproducible` and `notebook_crosscheck` reproduce every number from the saved prices; the second uses the research notebook's own code.
 
-> **Momentum v3 (current): always fully invested.** Each month, every lookback (1/3/6/12/24) holds **50% / 30% / 20% in its top three** ETFs by trailing return. It **never holds cash**, even when the top three or all six have negative trailing returns. v2 had two cash rules (a negative slot went to cash, and all-negative triggered a 3-month cash lock); its results are shown below for comparison. v1 (100% in the top asset) is in the git history.
+Round 1 is deterministic, so every run sees the same 84 results and the same top 5. Round 2 depends on what the Portfolio Manager Agent proposes. Across the live trials, the round-2 entry was always a 20-day-SMA, Top 1 strategy with a lookback between 15 and 30 days.
 
-## Bottom line (January 2011 to October 2026)
+## Round 1: the grid
 
-- **QQQ buy-and-hold still beat every approach** on return (18.7% CAGR) and Sharpe (0.86), with the deepest drawdown (−35.1%). SPY was second on return (14.1%).
-- **Removing cash raised momentum returns but deepened drawdowns.**
-  - CAGR rose for 4 of 5 lookbacks. The biggest change was the 1-month lookback, from 7.3% to 10.9%.
-  - Max drawdowns got worse for every lookback except the 24-month, which rarely used cash anyway. The 1-month went from −22.8% to −32.9%.
-- **The best momentum lookback is now 3 months:** 11.9% CAGR and a 0.77 Sharpe (equal to SPY's 0.77, below QQQ's 0.86), with a −24.1% max drawdown, shallower than SPY (−33.7%) and QQQ (−35.1%).
-- **No momentum lookback beat SPY or QQQ on return.** All five had lower volatility (13.7–15.2%) than either benchmark.
-- **The MA trend strategy** (9.3% CAGR, 0.67 Sharpe, −26.4% max drawdown) is unchanged.
-- **The cost asymmetry is small.** Momentum is shown before costs. Charging it 5 bps per unit of turnover lowers its CAGR by 0.1–0.3% a year.
+The Research Agent backtested all 84 combinations. Of them, **19 beat SPY's total return and 2 beat QQQ's**.
 
-## Head to head since January 2011 (v3)
+| Family | What the grid showed |
+|---|---|
+| **Top 1** (100% in the leader) | Highest returns (12 of 28 beat SPY), 26.3–28.4% volatility, drawdowns −32.5% to −53.4%, correlation with SPY 0.13–0.36 |
+| **Top 3 mix** (50/30/20) | 16.4–18.0% volatility, around SPY's 17.7%; 7 of 28 beat SPY; the best Sharpe (1.01, 20-day SMA, 15-day lookback); correlation with SPY 0.29–0.58 |
+| **Long top 3, short negatives** | None of 28 beat SPY; drawdowns as deep as −78.8%; correlation with SPY −0.14 to 0.24 |
+| **Signals** | The 20-day SMA with short lookbacks led; the 200-day SMA was the most stable across lookbacks and traded least |
 
-| | CAGR | Total | Volatility | Sharpe | Max DD |
-|---|---|---|---|---|---|
-| 1-month momentum | 10.9% | 413.7% | 13.7% | 0.71 | −32.9% |
-| **3-month momentum** | **11.9%** | 487.3% | 13.9% | **0.77** | **−24.1%** |
-| 6-month momentum | 11.0% | 416.2% | 13.9% | 0.71 | −27.8% |
-| 12-month momentum | 9.2% | 298.5% | 14.3% | 0.58 | −30.6% |
-| 24-month momentum | 11.0% | 418.0% | 15.2% | 0.66 | −28.8% |
-| MA trend strategy | 9.3% | 307.5% | 12.1% | 0.67 | −26.4% |
-| SPY | 14.1% | 699.6% | 17.0% | 0.77 | −33.7% |
-| **QQQ** | **18.7%** | **1391.0%** | 20.7% | **0.86** | −35.1% |
+For reference, QQQ's correlation with SPY is 0.93.
 
-The deck's *Head to Head* page adds Sortino, Calmar, beta, correlation and capture ratios for every series.
+## The Portfolio Manager's rounds
 
-### v3 (always invested) vs v2 (cash rules), since 2011
+**Top 5 selected in round 1, by total return.** Code checked the ranking.
 
-| | v3 CAGR | v2 CAGR | v3 Sharpe | v2 Sharpe | v3 Max DD | v2 Max DD |
-|---|---|---|---|---|---|---|
-| 1-month | **10.9%** | 7.3% | **0.71** | 0.52 | −32.9% | **−22.8%** |
-| 3-month | **11.9%** | 10.6% | **0.77** | 0.71 | −24.1% | **−22.4%** |
-| 6-month | 11.0% | **11.8%** | 0.71 | **0.79** | −27.8% | **−20.8%** |
-| 12-month | **9.2%** | 9.0% | 0.58 | 0.58 | −30.6% | **−22.5%** |
-| 24-month | **11.0%** | 10.3% | **0.66** | 0.62 | −28.8% | −28.8% |
+| Strategy | Total return | vs SPY | Annual | Max DD | Vol. | Sharpe | Corr. SPY |
+|---|---|---|---|---|---|---|---|
+| Top 1, 20d SMA, 15d | 834.9% | +492.1% | 23.8% | −38.2% | 27.1% | 0.84 | 0.16 |
+| Top 1, 20d SMA, 30d | 739.0% | +396.2% | 22.5% | −34.4% | 27.1% | 0.80 | 0.16 |
+| Top 1, 200d SMA, 180d | 622.1% | +279.3% | 20.8% | −42.2% | 26.7% | 0.75 | 0.36 |
+| Top 1, close, 30d | 611.9% | +269.1% | 20.6% | −37.5% | 26.7% | 0.75 | 0.13 |
+| Top 3 mix, 20d SMA, 15d | 548.1% | +205.2% | 19.5% | −27.5% | 16.8% | 1.01 | 0.31 |
 
-The trade-off is clear. Cash rules protected against drawdowns, especially for short lookbacks that triggered them often, but cost return in recoveries. The 6-month lookback is the exception: its cash periods added value.
+**The 5 proposals the PM sent back to the Research Agent.** It tested the region around what worked.
 
-### Returns by period (v3; 3M is total, the rest are annualized)
+| Proposal | Hypothesis (abridged) | Total return | Corr. SPY | Result |
+|---|---|---|---|---|
+| Top 1, 20d SMA, **21d** | Sits between the two strongest lookbacks (15d, 30d): does the 20d SMA edge hold across that range? | 811.9% | 0.16 | **Replaced** Top 3 mix, 20d SMA, 15d |
+| Top 1, **10d** SMA, 15d | A faster SMA may react sooner than the 20d leader | 303.6% | 0.18 | Below SPY |
+| Top 3 mix, 20d SMA, **21d** | A diversified version of the leading signal at a middle lookback | 535.8% | 0.30 | Not selected (Sharpe 1.00) |
+| Top 1, **150d** SMA, 180d | Is the slow 200d result robust to a nearby window? | 592.5% | 0.20 | Not selected |
+| Top 1, close, **21d** | Is the raw-close signal robust between its strong 15d and 30d results? | 240.7% | 0.16 | Below SPY |
 
-| | 3M | 1Y | 3Y | 5Y | Since 2011 |
-|---|---|---|---|---|---|
-| 1-month momentum | −0.2% | 11.7% | 23.7% | 10.3% | 10.9% |
-| 3-month momentum | −2.8% | 9.5% | 15.9% | 9.7% | 11.9% |
-| 6-month momentum | −1.9% | 6.6% | 21.0% | 9.4% | 11.0% |
-| 12-month momentum | −4.5% | 6.9% | **25.1%** | 11.8% | 9.2% |
-| 24-month momentum | **2.9%** | 7.1% | 23.5% | 12.1% | 11.0% |
-| MA trend strategy | 1.9% | 13.0% | 18.4% | 8.1% | 9.3% |
-| SPY | 1.9% | 16.8% | 22.1% | 12.9% | 14.1% |
-| QQQ | 0.7% | **18.9%** | **25.1%** | **14.7%** | **18.7%** |
+Under the replacement rule, one proposal beat the weakest of the top 5. Two neighbours of strong strategies collapsed below SPY: the 10-day SMA, and the close with a 21-day lookback. The PM read this as a sign that the edge is narrow and possibly overfit.
 
-### Momentum behavior since 2011 (v3)
+## The final line-up vs SPY and QQQ
 
-| | Rebalances (of 190 months) | Turnover | CAGR at 5 bps | Largest average weights | Current weights (Oct 2026) |
-|---|---|---|---|---|---|
-| 1-month | 181 | 106.5x | 10.6% | QQQ 24%, IWM 19%, GLD 17% | QQQ 50%, SPY 30%, IEF 20% |
-| 3-month | 154 | 60.0x | 11.7% | QQQ 27%, IWM 19%, SPY 18% | GLD 50%, SPY 30%, QQQ 20% |
-| 6-month | 139 | 45.7x | 10.8% | QQQ 29%, IWM 19%, SPY 19% | QQQ 50%, SPY 30%, IWM 20% |
-| 12-month | 117 | 33.6x | 9.1% | QQQ 31%, SPY 19%, GLD 18% | QQQ 50%, IWM 30%, SPY 20% |
-| 24-month | 88 | 21.5x | 10.9% | QQQ 39%, SPY 22%, GLD 15% | GLD 50%, QQQ 30%, SPY 20% |
+| Strategy | Total return | vs SPY | Annual | Max DD | Vol. | Sharpe | Corr. SPY | 80/20 blend annual | Blend max DD |
+|---|---|---|---|---|---|---|---|---|---|
+| Top 1, 20d SMA, 15d | 834.9% | +492.1% | 23.8% | −38.2% | 27.1% | 0.84 | 0.16 | 17.8% | −28.4% |
+| Top 1, 20d SMA, 21d | 811.9% | +469.1% | 23.5% | −34.4% | 27.3% | 0.82 | 0.16 | 17.7% | −28.4% |
+| Top 1, 20d SMA, 30d | 739.0% | +396.2% | 22.5% | −34.4% | 27.1% | 0.80 | 0.16 | 17.5% | −28.4% |
+| Top 1, 200d SMA, 180d | 622.1% | +279.3% | 20.8% | −42.2% | 26.7% | 0.75 | 0.36 | 17.0% | −29.7% |
+| Top 1, close, 30d | 611.9% | +269.1% | 20.6% | −37.5% | 26.7% | 0.75 | 0.13 | 17.2% | −26.1% |
+| SPY | 342.8% | — | 15.3% | −33.7% | 17.7% | 0.76 | 1.00 | 15.3% (alone) | −33.7% |
+| QQQ | 638.3% | +295.5% | 21.0% | −35.1% | 22.2% | 0.86 | 0.93 | | |
 
-Turnover counts how many times the whole portfolio was traded, with the initial purchase counted as 1.0x. Shorter lookbacks rebalance almost every month.
+**Calendar years for Top 1, 20d SMA, 15d, vs SPY:**
 
-## Pros and cons by lookback (v3)
-
-These are condensed. Every "con" covering a weakness vs SPY is **required by code** in the deck.
-
-| | Pros | Cons |
+| Year | Strategy | SPY |
 |---|---|---|
-| **1-month** | Strong 3-year return (23.7%). Low volatility (13.7%). | Deepest momentum drawdown (−32.9%), close to SPY's. Heaviest turnover (106.5x). Return well below SPY. |
-| **3-month** | Best momentum CAGR (11.9%) and Sharpe (0.77, equal to SPY's). Shallowest momentum drawdown (−24.1%). | Return still well below SPY (14.1%) and QQQ (18.7%). Weak last 3 years (15.9%). |
-| **6-month** | Solid 11.0% CAGR and 0.71 Sharpe | Worse than v2 on every measure since 2011. Trails SPY on return and Sharpe. |
-| **12-month** | Best 3-year return among lookbacks (25.1%, equal to QQQ's) | Lowest momentum CAGR (9.2%) and Sharpe (0.58). Drawdown (−30.6%) close to SPY's. |
-| **24-month** | Lowest turnover (21.5x). Strong recent 5-year return (12.1%). | Highest momentum volatility (15.2%). Trails SPY on return (11.0% vs 14.1%) and Sharpe (0.66 vs 0.77). |
+| 2017 | −0.1% | 21.7% |
+| 2019 | 1.9% | 31.2% |
+| 2022 | 6.4% | −18.2% |
+| 2025 | 53.3% | 17.7% |
+| 2026 YTD | 155.0% | 14.1% |
 
-**Common con (v3):** with no cash rule, momentum has no mechanism to step aside in broad sell-offs. In months when all six ETFs are falling, it still holds the three falling least.
+## Reading the results
 
-## MA trend strategy since 2007 (its own history)
+- **Return:** every final strategy beat SPY on total return by a wide margin, and three beat QQQ.
+- **Correlation:** with SPY it is low, 0.13–0.36 against QQQ's 0.93. The returns came from rotating across a macro basket of stocks, Treasuries, gold, oil and credit, not from holding equities. This is the centre of the deck's diversification case, and the PDF highlights every correlation figure in its commentary.
+- **Risk:** each took more risk than SPY. Volatility was about 27% and every worst drawdown was deeper than SPY's −33.7%. On a risk-adjusted basis (Sharpe 0.75–0.84) they roughly match SPY (0.76) and trail QQQ (0.86).
+- **Concentration:**
+  - *In time:* much of the edge comes from 2025–2026, a gold- and oil-led period.
+  - *In holdings:* the Top 1 rule holds a single ETF, and USO led about 36% of the months.
+  - *Between strategies:* the short-lookback strategies behave almost like one strategy.
+- **As a satellite:** because correlation with SPY is low, a 20% sleeve improved a SPY portfolio historically. Return was higher, and volatility and drawdown were lower.
+- **Trust:** the strategies were selected with hindsight from 89 tested combinations, with no costs. The deck's "Harsh Feedback" page makes this case against the process. The PM's next steps:
+  - out-of-sample and sub-period checks;
+  - a turnover-cost estimate;
+  - a second look at the removed Top 3 mix, the best risk-adjusted strategy.
 
-| Since 2007 | MA strategy | SPY | 60/40 |
-|---|---|---|---|
-| CAGR | 7.6% | 10.9% | 8.4% |
-| Volatility | 12.4% | 19.5% | 11.2% |
-| Sharpe | 0.53 | 0.55 | 0.63 |
-| Max drawdown | −26.4% | −55.2% | −31.4% |
-| Growth of $10,000 | $42,495 | $77,253 | $48,905 |
+## Run cost
 
-The walk-forward chose the 200-day MA in 16 of 20 years and the 50-day in 4. A plain 60/40 portfolio beat the MA strategy since 2007 on both return and Sharpe.
+The example run took **323 s, $1.20 and 386,383 tokens**. By agent:
 
-## Caveats
+| Agent | Cost |
+|---|---|
+| Presentation | $0.41 |
+| Portfolio Manager | $0.35 |
+| Research | $0.19 |
+| Analytics | $0.14 |
+| Team | $0.08 |
+| Data | $0.04 |
 
-- **Hypothetical.** Prices come from Yahoo Finance via yfinance, with monthly rebalancing at month-end closes and no fees or taxes.
-- **Momentum excludes trading costs** (see the sensitivity above).
-- **QQQ dominance.** QQQ is both the momentum strategies' most-held asset and the best benchmark. A period less kind to large-cap tech would look different.
-- **Single sample.** One 15.8-year path. All five lookbacks are reported, and none was optimized. Comparing v2 with v3 on the same history is itself a form of selection, so treat the differences as descriptive, not predictive.
+The cost per tool is in [tools-and-tokens.md](tools-and-tokens.md).

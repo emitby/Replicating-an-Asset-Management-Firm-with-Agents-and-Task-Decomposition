@@ -1,12 +1,16 @@
-"""Command line: run the pipeline, re-run a stage, run evals, render PDF pages.
+"""Command line: run the pipeline, re-run a stage, rebuild the PDF, run evals, render PDF pages.
 
 Always launch through run.ps1 / run.sh, which keep library caches inside the project.
 
     run.ps1 run [--offline]
     run.ps1 stage presentation --from runs/<id>
+    run.ps1 build-pdf runs/<id>          # re-render the PDF from saved artifacts: no agents, no API calls
     run.ps1 eval [--live] [--run runs/<id>] [--trials N]
     run.ps1 render-pages runs/<id>
     run.ps1 test
+
+Every command first installs the process sandbox (`strategy.sandbox`): from then on
+this process cannot delete files or read/write outside the project.
 """
 
 import argparse
@@ -14,17 +18,21 @@ import json
 import sys
 from pathlib import Path
 
+from strategy import sandbox
 from strategy.config import PipelineConfig
 from strategy.paths import RUNS_DIR, confine
+
+# Stage names for `stage` (kept here so --help doesn't import the agents).
+STAGE_NAMES = ("data", "research1", "pm1", "research2", "pm2", "analytics", "team", "presentation")
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="strategy", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="run the full five-agent pipeline")
+    r = sub.add_parser("run", help="run the full six-agent pipeline")
     r.add_argument("--offline", action="store_true", help="use cached prices instead of Yahoo Finance")
     s = sub.add_parser("stage", help="re-run one stage from an earlier run's artifacts")
-    s.add_argument("name", choices=["data", "backtest", "analytics", "team", "presentation"])
+    s.add_argument("name", choices=list(STAGE_NAMES))
     s.add_argument("--from", dest="source", required=True, type=Path)
     s.add_argument("--offline", action="store_true")
     e = sub.add_parser("eval", help="score runs against the eval suite")
@@ -33,7 +41,11 @@ def main(argv=None):
     e.add_argument("--trials", type=int, default=1)
     g = sub.add_parser("render-pages", help="render PDF pages to PNG for review")
     g.add_argument("run", type=Path)
+    b = sub.add_parser("build-pdf", help="rebuild the PDF from a finished run's saved artifacts (no agents)")
+    b.add_argument("run", type=Path)
+    b.add_argument("--out", default="presentation.pdf", help="output file name inside the run folder")
     args = p.parse_args(argv)
+    sandbox.install()
 
     if args.cmd == "run":
         from strategy.harness import new_context, run_pipeline
@@ -50,6 +62,9 @@ def main(argv=None):
     elif args.cmd == "eval":
         from evals.run_evals import main as eval_main
         sys.exit(eval_main(live=args.live, run=args.run, trials=args.trials))
+    elif args.cmd == "build-pdf":
+        from strategy.pdf import build_from_run
+        print(build_from_run(confine(args.run), args.out))
     elif args.cmd == "render-pages":
         from evals.scorers import render_pages
         for path in render_pages(confine(args.run)):

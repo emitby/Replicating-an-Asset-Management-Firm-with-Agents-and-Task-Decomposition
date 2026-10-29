@@ -1,3 +1,4 @@
-"""SPY/IEF moving-average rotation: a multi-agent research and pitch pipeline."""
+"""Agentic Capital Management: a multi-agent research, portfolio-manager review and pitch pipeline
+for a month-end ETF ranking strategy."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

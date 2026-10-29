@@ -33,7 +33,15 @@ def test_ticker_allowlist():
     assert validate_tickers(["SPY", "IEF", "SPY"]) == ["SPY", "IEF"]
     with pytest.raises(DataError):
         validate_tickers(["SPY", "TSLA"])
-    assert validate_tickers(["QQQ", "TLT", "GLD", "IWM"]) == ["QQQ", "TLT", "GLD", "IWM"]   # momentum universe
+    with pytest.raises(DataError):
+        validate_tickers(["IWM"])                                  # not in this strategy's universe
+    assert validate_tickers(["QQQ", "TLT", "GLD", "USO", "JNK", "^IRX"]) == ["QQQ", "TLT", "GLD", "USO", "JNK", "^IRX"]
+
+
+def test_clean_requires_every_universe_etf():
+    df = synthetic_prices(years=12).drop(columns="JNK")
+    with pytest.raises(DataError, match="JNK"):
+        clean(df)
 
 
 def test_quality_report_flags_split_like_jump():

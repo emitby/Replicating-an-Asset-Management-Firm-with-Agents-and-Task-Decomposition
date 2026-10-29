@@ -1,22 +1,26 @@
-"""Performance and risk metrics over trailing windows.
+"""Performance, risk and portfolio-fit metrics for the final strategies and the benchmarks.
 
 Conventions:
 - Returns are simple daily returns, and growth compounds.
 - Annualized figures use 252 trading days, and are reported only for windows of
-  12 months or more. Shorter windows report total return only.
-- Sharpe and Sortino use excess returns over the daily T-bill rate.
+  12 months or more. A one-year window's annual return is its total return.
+- Sharpe and Sortino use excess returns over the daily T-bill rate (``rf`` column).
 - Beta, correlation and capture ratios are measured against SPY.
+- Portfolio fit: correlations of daily returns over the scored window, and a
+  blend of SPY with a strategy, rebalanced daily to fixed weights (a
+  simplification that the PDF discloses).
 """
 
 import numpy as np
 import pandas as pd
 
-from strategy.config import ANNUALIZE_FROM_MONTHS, COMPARISON_WINDOWS, TRADING_DAYS, WINDOWS
+from strategy.config import ANNUALIZE_FROM_MONTHS, BENCHMARKS, TRADING_DAYS, WINDOWS
 
-SERIES = ("Strategy", "SPY", "60/40")
+FIT_ASSETS = ("SPY", "QQQ", "TLT", "GLD")   # correlation partners for the portfolio-fit analysis
 
 
 def window_slice(df, months):
+    """The trailing `months` calendar months of `df` (all of it when months is None)."""
     if months is None:
         return df
     start = df.index.max() - pd.DateOffset(months=months)
@@ -24,17 +28,30 @@ def window_slice(df, months):
 
 
 def max_drawdown(returns):
+    """Largest peak-to-trough fall of the compounded return series (a negative number)."""
     equity = (1 + returns).cumprod()
     dd = equity / equity.cummax() - 1
     return float(dd.min()) if len(dd) else float("nan")
 
 
 def drawdown_series(returns):
+    """Daily drawdown from the running peak of the compounded return series."""
     equity = (1 + returns).cumprod()
     return equity / equity.cummax() - 1
 
 
 def series_metrics(r, rf, annualize, bench=None):
+    """Return and risk metrics of one daily return series.
+
+    Args:
+        r: daily returns.
+        rf: daily risk-free rate (aligned to r; missing days count as 0).
+        annualize: add CAGR, volatility, Sharpe, Sortino, max drawdown and Calmar.
+        bench: optional benchmark returns for beta, correlation and capture ratios.
+
+    Returns:
+        A dict of floats (total_return, days, ... as applicable).
+    """
     r = r.dropna()
     rf = rf.reindex(r.index).fillna(0.0)
     n = len(r)
@@ -71,8 +88,19 @@ def series_metrics(r, rf, annualize, bench=None):
     return m
 
 
-def _window_metrics(df, label, months, series):
-    """Shared by the MA analytics and the momentum comparison, so both use identical definitions."""
+def compute_window(returns, label, series):
+    """Metrics for each of `series` over one trailing window.
+
+    Args:
+        returns: daily returns with the series columns plus ``SPY`` and ``rf``.
+        label: a key of `config.WINDOWS`.
+        series: column names to measure (final strategy ids and benchmarks).
+
+    Returns:
+        {"window", "start", "end", "annualized", "series": {name: metrics}}.
+    """
+    months = WINDOWS[label]
+    df = window_slice(returns, months)
     annualize = months is None or months >= ANNUALIZE_FROM_MONTHS
     out = {"window": label, "start": str(df.index.min().date()), "end": str(df.index.max().date()),
            "annualized": annualize, "series": {}}
@@ -87,174 +115,41 @@ def _window_metrics(df, label, months, series):
     return out
 
 
-MOMENTUM_SERIES_FMT = "MOM{}"
-COMPARISON_MA = "MA Strategy"
+def growth_of(returns, series, amount=10_000):
+    """Final value of `amount` invested in each series over the whole scored window."""
+    return {name: float(amount * (1 + returns[name]).prod()) for name in series}
 
 
-COMPARISON_BENCHMARKS = ("SPY", "QQQ")
-
-
-def comparison_frame(returns, lookbacks):
-    """Daily returns for the head-to-head: MOM1..MOM24, the MA strategy, SPY and QQQ, from the momentum start."""
-    mom_cols = [MOMENTUM_SERIES_FMT.format(L) for L in lookbacks]
-    df = returns[[*mom_cols, "Strategy", *COMPARISON_BENCHMARKS, "rf"]].dropna(subset=mom_cols)
-    return df.rename(columns={"Strategy": COMPARISON_MA})
-
-
-def comparison_series(lookbacks):
-    return [*(MOMENTUM_SERIES_FMT.format(L) for L in lookbacks), COMPARISON_MA, *COMPARISON_BENCHMARKS]
-
-
-def monthly_weights(returns, name, index):
-    """Month-by-month target weights (universe + CASH) of one momentum sub-strategy."""
-    cols = [c for c in returns.columns if c.startswith(f"w_{name}_")]
-    w = returns.loc[index, cols].rename(columns=lambda c: c[len(f"w_{name}_"):])
-    return w.groupby(w.index.to_period("M")).first()
-
-
-def comparison_window(returns, label, lookbacks):
-    """Metrics for all momentum sub-strategies, the MA strategy, SPY and QQQ over one window."""
-    if label not in COMPARISON_WINDOWS:
-        raise ValueError(f"Unknown window {label!r}; use one of {list(COMPARISON_WINDOWS)}.")
-    months = COMPARISON_WINDOWS[label]
-    df = window_slice(comparison_frame(returns, lookbacks), months)
-    out = _window_metrics(df, label, months, comparison_series(lookbacks))
-    out["momentum_activity"] = {}
-    for L in lookbacks:
-        name = MOMENTUM_SERIES_FMT.format(L)
-        mw = monthly_weights(returns, name, df.index)
-        changed = (mw.diff().abs().sum(axis=1) > 1e-12).iloc[1:]
-        current = mw.iloc[-1]
-        out["momentum_activity"][name] = {
-            "months": int(len(mw)),
-            "rebalances": int(changed.sum()),
-            "full_cash_months": int((mw["CASH"] >= 1 - 1e-12).sum()),
-            "avg_cash_weight": float(mw["CASH"].mean()),
-            "current_weights": {a: float(v) for a, v in current.items() if v > 0},
-        }
-    return out
-
-
-def cost_sensitivity(returns, lookbacks, cost_bps):
-    """What momentum would have earned paying the MA strategy's cost per switch (momentum is shown gross).
-    Every change of holding (including into or out of cash) and the initial purchase count as one trade."""
-    df = comparison_frame(returns, lookbacks)
-    out = {}
-    for L in lookbacks:
-        name = MOMENTUM_SERIES_FMT.format(L)
-        cols = [c for c in returns.columns if c.startswith(f"w_{name}_")]
-        w = returns.loc[df.index, cols]
-        assets = [c for c in cols if not c.endswith("_CASH")]
-        # Fraction of the portfolio traded per day (target-to-target); the first day is the initial buy.
-        turnover = w.diff().abs().sum(axis=1) / 2
-        turnover.iloc[0] = w.iloc[0][assets].sum()
-        net = df[name] - turnover * cost_bps / 10_000.0
-        years = len(net) / TRADING_DAYS
-        gross_cagr = float((1 + df[name]).prod() ** (1 / years) - 1)
-        net_cagr = float((1 + net).prod() ** (1 / years) - 1)
-        out[name] = {"turnover": float(turnover.sum()), "cost_bps": cost_bps,
-                     "cagr_gross": gross_cagr, "cagr_with_costs": net_cagr}
-    return out
-
-
-def comparison_extras(returns, lookbacks, cost_bps=5.0):
-    df = comparison_frame(returns, lookbacks)
-    cols = [c for c in df.columns if c != "rf"]
-    yearly = (1 + df[cols]).groupby(df.index.year).prod() - 1
-    return {
-        "calendar_years": {int(y): {k: float(v) for k, v in row.items()} for y, row in yearly.iterrows()},
-        "growth_of_10000": {c: float(10_000 * (1 + df[c]).prod()) for c in cols},
-        "cost_sensitivity": cost_sensitivity(returns, lookbacks, cost_bps),
-        "start": str(df.index.min().date()), "end": str(df.index.max().date()),
-    }
-
-
-def momentum_adverse(comparison):
-    """For each sub-strategy: metrics where it did worse than SPY since 2011 (its 'Con' obligations)."""
-    s2011 = comparison["windows"]["S2011"]["series"]
-    spy = s2011["SPY"]
-    out = {}
-    for name, m in s2011.items():
-        if not name.startswith("MOM"):
-            continue
-        worse = []
-        if m["max_drawdown"] < spy["max_drawdown"]:
-            worse.append("max_drawdown")
-        if m["sharpe"] < spy["sharpe"]:
-            worse.append("sharpe")
-        if m["cagr"] < spy["cagr"]:
-            worse.append("cagr")
-        out[name] = worse
-    return out
-
-
-def compute_window(returns, label):
-    """Metrics for every series over one trailing window."""
-    if label not in WINDOWS:
-        raise ValueError(f"Unknown window {label!r}; use one of {list(WINDOWS)}.")
-    months = WINDOWS[label]
-    df = window_slice(returns, months)
-    out = _window_metrics(df, label, months, SERIES)
-    w = df["w_spy"]
-    out["strategy_activity"] = {
-        "switches": int(w.diff().abs().fillna(0).gt(0).sum()),
-        "pct_time_in_spy": float(w.mean()),
-        "current_allocation_spy": float(w.iloc[-1]),
-    }
-    out["excess_vs_spy"] = {
-        "total_return": out["series"]["Strategy"]["total_return"] - out["series"]["SPY"]["total_return"],
-        "max_drawdown": out["series"]["Strategy"]["max_drawdown"] - out["series"]["SPY"]["max_drawdown"],
-    }
-    if out["annualized"]:
-        out["excess_vs_spy"]["cagr"] = out["series"]["Strategy"]["cagr"] - out["series"]["SPY"]["cagr"]
-    return out
-
-
-def adverse_windows(analytics):
-    """Where the MA strategy did worse than its benchmarks, which the deck must acknowledge so the
-    pitch can't cherry-pick:
-    - vs SPY, in any window, on max drawdown or Sharpe
-    - vs 60/40, since inception, on return or Sharpe (a reviewer found the deck omitted 60/40 beating it)
-    """
-    out = []
-    for w, data in analytics["windows"].items():
-        s, b = data["series"]["Strategy"], data["series"]["SPY"]
-        worse = []
-        if s["max_drawdown"] < b["max_drawdown"]:
-            worse.append("max_drawdown")
-        if "sharpe" in s and s["sharpe"] == s["sharpe"] and s["sharpe"] < b["sharpe"]:
-            worse.append("sharpe")
-        if worse:
-            out.append({"window": w, "vs": "SPY", "worse_on": worse})
-    si = analytics["windows"].get("SI", {}).get("series", {})
-    if "60/40" in si:
-        s, mix = si["Strategy"], si["60/40"]
-        worse = [k for k in ("cagr", "sharpe") if k in s and s[k] < mix[k]]
-        if worse:
-            out.append({"window": "SI", "vs": "60/40", "worse_on": worse})
-    return out
-
-
-def rolling_summary(returns, days=TRADING_DAYS):
-    """How often, and by how much, the strategy beat SPY over rolling 1-year periods."""
-    roll = (1 + returns[["Strategy", "SPY"]]).rolling(days).apply(np.prod, raw=True) - 1
-    roll = roll.dropna()
-    diff = roll["Strategy"] - roll["SPY"]
-    return {
-        "periods": int(len(roll)),
-        "pct_periods_beating_spy": float((diff > 0).mean()),
-        "worst_1y_strategy": float(roll["Strategy"].min()),
-        "worst_1y_spy": float(roll["SPY"].min()),
-        "best_1y_strategy": float(roll["Strategy"].max()),
-        "best_1y_spy": float(roll["SPY"].max()),
-        "median_1y_excess": float(diff.median()),
-    }
-
-
-def growth_of(returns, amount=10_000):
-    return {name: float(amount * (1 + returns[name]).prod()) for name in SERIES}
-
-
-def calendar_year_returns(returns):
-    yearly = (1 + returns[list(SERIES)]).groupby(returns.index.year).prod() - 1
+def calendar_year_returns(returns, series):
+    """Compounded return of each series in each calendar year (the last year is year-to-date)."""
+    yearly = (1 + returns[list(series)]).groupby(returns.index.year).prod() - 1
     return {int(y): {k: float(v) for k, v in row.items()} for y, row in yearly.iterrows()}
+
+
+def portfolio_fit(returns, prices, strategy_ids, weight):
+    """How each final strategy fits next to the asset classes an investor already holds.
+
+    Args:
+        returns: daily returns over the scored window (strategy columns, SPY, rf).
+        prices: daily prices (for TLT and GLD returns).
+        strategy_ids: the final strategies.
+        weight: the strategy's share in a SPY + strategy blend (e.g. 0.2 for 80/20).
+
+    Returns:
+        {"blend_weight", "correlation": {id: {asset: corr}},
+         "blends": {id: metrics of the blend}, "spy": metrics of SPY alone}.
+    """
+    assets = prices[list(FIT_ASSETS)].pct_change().reindex(returns.index)
+    corr = {sid: {a: float(returns[sid].corr(assets[a])) for a in FIT_ASSETS} for sid in strategy_ids}
+    rf = returns["rf"]
+    blends = {}
+    for sid in strategy_ids:
+        mix = (1 - weight) * returns["SPY"] + weight * returns[sid]   # rebalanced daily to fixed weights
+        blends[sid] = series_metrics(mix, rf, True, bench=returns["SPY"])
+    return {"blend_weight": weight, "correlation": corr, "blends": blends,
+            "spy": series_metrics(returns["SPY"], rf, True)}
+
+
+def report_series(final_ids):
+    """Column order used by every analytics table and chart: the final strategies, then the benchmarks."""
+    return [*final_ids, *BENCHMARKS]

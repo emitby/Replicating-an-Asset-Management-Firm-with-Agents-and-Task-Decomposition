@@ -2,6 +2,8 @@
 
 Every scorer is code-graded and deterministic, so evals are cheap to re-run on
 saved runs. Live evals generate fresh runs, then score them with the same code.
+The scorer names match `strategy.governance.EVALS` one-to-one (a unit test
+checks this), so the PDF's evals page always describes what actually runs.
 """
 
 import json
@@ -11,22 +13,26 @@ from pathlib import Path
 
 import pandas as pd
 
-from strategy.analytics import compute_window
-from strategy.backtest import run_all
-from strategy.config import COMPARISON_WINDOWS, MomentumConfig, StrategyConfig, WINDOWS
-from strategy.guardrails import (NumberIndex, banned_phrases, extract_numbers, persona_mentions,
-                                 unsupported_numbers)
+from evals.crosscheck_ranking import crosscheck
+from strategy.config import UNIVERSE, RankingConfig
+from strategy.guardrails import NumberIndex, banned_phrases, persona_mentions, unsupported_numbers
+from strategy.hooks import default_hooks
 from strategy.paths import confine, read_json
-from strategy.pdf import CODE_PAGE_TITLES, DISCLOSURES, GEN_FOOTER, PERF_FOOTER
+from strategy.pdf import SECTIONS, TABLE_PAGE_PREFIX, TITLE
+from strategy.ranking import (RankingError, StrategySpec, apply_replacement, daily_rf, grid, run_strategy, score,
+                              top_n, validate_proposal)
 from strategy.team import FICTIONAL_LABEL, validate_team
 
 CURRENT_YEAR = pd.Timestamp.today().year
+AGENT_NAMES = ("Data Agent", "Research Agent", "Portfolio Manager Agent", "Analytics Agent", "Team Agent",
+               "Presentation Agent")
 
 
 @dataclass
 class Score:
+    """One scorer's result: a 0..1 score, its pass threshold, and the individual checks."""
     name: str
-    score: float                # 0..1
+    score: float
     threshold: float
     details: dict = field(default_factory=dict)
 
@@ -45,254 +51,346 @@ class Run:
         self.dir = confine(path)
 
     def json(self, name):
+        """A JSON artifact, or None if missing."""
         p = self.dir / name
         return read_json(p) if p.exists() else None
 
     def csv(self, name):
+        """A CSV artifact indexed by date, or None if missing."""
         p = self.dir / name
         return pd.read_csv(p, index_col=0, parse_dates=True) if p.exists() else None
 
     def trace(self):
+        """The trace events (list of dicts)."""
         p = self.dir / "trace.jsonl"
-        return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l] if p.exists() else []
+        return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line] if p.exists() else []
 
     def pdf_pages(self):
+        """Text of each PDF page, whitespace-normalized."""
         from pypdf import PdfReader
         p = self.dir / "presentation.pdf"
         if not p.exists():
             return []
         return [re.sub(r"\s+", " ", page.extract_text() or "") for page in PdfReader(str(p)).pages]
 
+    def scores(self):
+        """The scores table from research.json (rows: ids, SPY, QQQ)."""
+        return pd.DataFrame(self.json("research.json")["scores"]).T
+
     def number_index(self):
+        """The same citable-number index the pipeline used (`RunContext.number_index`), rebuilt from artifacts."""
+        research, pm = self.json("research.json") or {}, self.json("pm.json") or {}
         dr = self.json("data_report.json") or {}
-        return NumberIndex(self.json("analytics.json") or {}, self.json("backtest.json") or {},
-                           {"rows": dr.get("rows")},
-                           constants=StrategyConfig().constants() | MomentumConfig().constants())
+        params = {v for p in pm.get("proposals", []) for v in (p["sma"], p["lookback_days"])}
+        return NumberIndex(research.get("scores", {}), research.get("facts", {}), self.json("analytics.json") or {},
+                           (pm.get("final") or {}).get("replacements", []), {"rows": dr.get("cleaned_rows")},
+                           constants=RankingConfig().constants() | params)
 
 
 def _missing(name, threshold, what):
     return Score(name, 0.0, threshold, {"error": f"missing {what}"})
 
 
-# ---------------------------------------------------------------- data/backtest
+def _score(name, checks, threshold, **details):
+    return Score(name, sum(map(bool, checks.values())) / len(checks), threshold, {**checks, **details})
+
+
+def agent_texts(run):
+    """Every agent-written string that reaches the PDF, as (where, text) pairs."""
+    out = []
+    deck = run.json("deck.json") or {}
+    for s in deck.get("slides", []):
+        out.append((f"slide {s['title']!r}", " \n".join([s["title"], *s["bullets"]])))
+    for f in (run.json("analytics.json") or {}).get("findings", []):
+        out.append(("analytics finding", f))
+    research = run.json("research.json") or {}
+    for r, data in research.get("rounds", {}).items():
+        out += [(f"research r{r}", t) for t in [data["message"], *data["findings"]]]
+    pm = run.json("pm.json") or {}
+    for item in pm.get("top5", []) + pm.get("proposals", []) + (pm.get("final") or {}).get("decisions", []):
+        out += [(f"pm {item['id']}", item[k]) for k in ("rationale", "hypothesis", "pro", "con") if k in item]
+    out += [("pm message", t) for t in (pm.get("message_to_research"), (pm.get("final") or {}).get("message")) if t]
+    out += [("meeting", line["text"]) for line in pm.get("meeting", [])]
+    out += [(f"feedback {kind}", line["text"]) for kind, lines in pm.get("feedback", {}).items() for line in lines]
+    return out
+
+
+# ------------------------------------------------------------------ run and data
+
+def run_health(run, threshold=1.0, max_cost_usd=25.0):
+    m = run.json("manifest.json")
+    if not m:
+        return _missing("run_health", threshold, "manifest.json")
+    events = run.trace()
+    finished = {e["agent"] for e in events if e.get("type") == "finish"}
+    checks = {"status_ok": m["status"] == "ok",
+              **{f"{a} finished": a in finished for a in AGENT_NAMES},
+              "no_tool_crash": not any(e.get("type") == "tool_crash" for e in events),
+              "cost_under_cap": m["cost_usd"] <= max_cost_usd}
+    return _score("run_health", checks, threshold, cost_usd=m["cost_usd"])
+
 
 def data_integrity(run, threshold=1.0):
     prices = run.csv("prices.csv")
     if prices is None:
         return _missing("data_integrity", threshold, "prices.csv")
+    cols = [*UNIVERSE, "^IRX"]
     checks = {
-        "has_all_tickers": {"SPY", "IEF", "^IRX", *MomentumConfig().universe} <= set(prices.columns),
-        "no_missing_etf_prices": bool(prices[["SPY", "IEF"]].notna().all().all()),
-        "at_least_15_years": (prices.index.max() - prices.index.min()).days > 15 * 365,
-        "recent_data": (pd.Timestamp.today() - prices.index.max()).days < 10,
-        "monotonic_dates": bool(prices.index.is_monotonic_increasing),
-        "positive_prices": bool((prices[["SPY", "IEF"]] > 0).all().all()),
+        "all_tickers": set(cols) <= set(prices.columns),
+        "no_missing_etf_prices": prices.reindex(columns=list(UNIVERSE)).notna().all().all(),
+        "positive_prices": (prices.reindex(columns=list(UNIVERSE)) > 0).all().all(),
+        "ten_years": (prices.index.max() - prices.index.min()).days >= 10 * 365,
+        "recent": (pd.Timestamp.today() - prices.index.max()).days <= 10,
+        "sorted_unique_dates": prices.index.is_monotonic_increasing and prices.index.is_unique,
+        "completed_sessions_only": prices.index.max().normalize() < pd.Timestamp.today().normalize(),
     }
-    return Score("data_integrity", sum(checks.values()) / len(checks), threshold, checks)
+    return _score("data_integrity", checks, threshold)
 
 
-def backtest_tool_coverage(run, threshold=1.0):
-    calls = [e for e in run.trace() if e.get("type") == "tool" and e.get("agent") == "Backtest Agent" and e.get("ok")]
-    mas = {c["input"].get("ma_days") for c in calls if c["tool"] == "run_ma_backtest"}
-    checks = {f"ran_MA{n}": n in mas for n in StrategyConfig().ma_windows}
-    checks["ran_walk_forward"] = any(c["tool"] == "run_walk_forward" for c in calls)
-    checks["compared_candidates"] = any(c["tool"] == "compare_candidates" for c in calls)
-    return Score("backtest_tool_coverage", sum(checks.values()) / len(checks), threshold, checks)
+# ------------------------------------------------------------------ research
+
+def research_coverage(run, threshold=1.0):
+    research, pm = run.json("research.json"), run.json("pm.json")
+    if not research or not pm:
+        return _missing("research_coverage", threshold, "research.json or pm.json")
+    grid_ids = [s.id for s in grid(RankingConfig())]
+    rounds = research["rounds"]
+    calls = [e for e in run.trace() if e.get("type") == "tool" and e.get("ok")]
+    ran = {StrategySpec(e["input"]["portfolio"], e["input"]["sma"], e["input"]["lookback_days"]).id
+           for e in calls if e["tool"] == "run_strategy"}
+    proposals = {p["id"] for p in pm.get("proposals", [])}
+    checks = {
+        "round1_is_full_grid": rounds.get("1", {}).get("ids") == grid_ids,
+        "run_grid_called": any(e["tool"] == "run_grid" for e in calls),
+        "round2_is_proposals": set(rounds.get("2", {}).get("ids", [])) == proposals,
+        "every_proposal_run": proposals <= ran,
+        "every_strategy_scored": set(grid_ids) | proposals <= set(research["scores"]),
+    }
+    return _score("research_coverage", checks, threshold)
 
 
-def backtest_reproducible(run, threshold=1.0):
-    prices, saved = run.csv("prices.csv"), run.csv("returns.csv")
-    if prices is None or saved is None:
-        return _missing("backtest_reproducible", threshold, "prices.csv/returns.csv")
-    _, fresh = run_all(prices, StrategyConfig())
-    cols = ["Strategy", "SPY", "60/40", "w_spy"]
-    diff = float((fresh[cols] - saved[cols]).abs().max().max())
-    return Score("backtest_reproducible", 1.0 if diff < 1e-10 else 0.0, threshold, {"max_abs_diff": diff})
+def research_reproducible(run, threshold=1.0, tol=1e-10):
+    prices, returns, research = run.csv("prices.csv"), run.csv("strategy_returns.csv"), run.json("research.json")
+    if prices is None or returns is None or not research:
+        return _missing("research_reproducible", threshold, "prices, returns or research")
+    px = prices[list(UNIVERSE)]
+    ids = [c for c in returns.columns if c not in ("SPY", "QQQ", "rf")]
+    rerun = {sid: run_strategy(px, StrategySpec.from_id(sid))[0] for sid in ids}
+    worst = max(float((rerun[sid].reindex(returns.index) - returns[sid]).abs().max()) for sid in ids)
+    rescored = score(rerun, prices, pd.Timestamp(research["window_start"]), daily_rf(prices))
+    saved = pd.DataFrame(research["scores"]).T
+    cols = [c for c in rescored.columns if c in saved.columns]   # runs saved before corr_spy lack that column
+    score_diff = float((rescored[cols] - saved.loc[rescored.index, cols]).abs().max().max())
+    checks = {"returns_match": worst <= tol, "scores_match": score_diff <= 1e-9}
+    return _score("research_reproducible", checks, threshold, max_return_diff=worst, max_score_diff=score_diff)
 
 
-def analytics_consistency(run, threshold=1.0):
-    returns, saved = run.csv("returns.csv"), run.json("analytics.json")
-    if returns is None or saved is None:
-        return _missing("analytics_consistency", threshold, "returns.csv/analytics.json")
-    bad = []
-    for w in WINDOWS:
-        fresh = compute_window(returns, w)
-        for s, metrics in fresh["series"].items():
-            for k, v in metrics.items():
-                old = saved["windows"].get(w, {}).get("series", {}).get(s, {}).get(k)
-                if old is None or (v == v and abs(v - old) > 1e-9):
-                    bad.append(f"{w}/{s}/{k}")
-    checks = len(WINDOWS) * 3
-    return Score("analytics_consistency", 1.0 if not bad else 0.0, threshold,
-                 {"windows_checked": checks, "mismatches": bad[:20]})
+def notebook_crosscheck(run, threshold=1.0):
+    prices, returns = run.csv("prices.csv"), run.csv("strategy_returns.csv")
+    if prices is None or returns is None:
+        return _missing("notebook_crosscheck", threshold, "prices.csv or strategy_returns.csv")
+    result = crosscheck(prices, returns, UNIVERSE)
+    checks = {"all_strategies_match_notebook": not result["mismatched"], "checked_all": result["checked"] >= 89}
+    return _score("notebook_crosscheck", checks, threshold, **result)
 
 
-def saved_momentum_config(mom):
-    """The MomentumConfig a run actually used (from momentum.json), so older runs are judged by their own rules.
-    Runs saved before the cash_rules switch existed had cash rules on (v2)."""
-    p = dict(mom.get("params", {}))
-    p.setdefault("cash_rules", True)
-    for k in ("universe", "lookbacks", "slot_weights", "benchmarks"):
-        if k in p:
-            p[k] = tuple(p[k])
-    return MomentumConfig(**{k: v for k, v in p.items() if k in MomentumConfig.__dataclass_fields__})
+# ------------------------------------------------------------------ PM protocol and dialogue
+
+def pm_protocol(run, threshold=1.0):
+    research, pm = run.json("research.json"), run.json("pm.json")
+    if not research or not pm or "final" not in pm:
+        return _missing("pm_protocol", threshold, "research.json or a finalized pm.json")
+    cfg, sc = RankingConfig(), run.scores()
+    r1 = research["rounds"]["1"]["ids"]
+    top = [p["id"] for p in pm["top5"]]
+    props = pm["proposals"]
+    valid = True
+    seen = set(r1)
+    for p in props:
+        try:
+            validate_proposal(StrategySpec(p["portfolio"], p["sma"], p["lookback_days"]), cfg, seen)
+        except RankingError:
+            valid = False
+        seen.add(p["id"])
+    expected = apply_replacement(sc, top, [p["id"] for p in props])
+    removed = {r["removed"] for r in expected["replacements"]}
+    decided = {d["id"] for d in pm["final"]["decisions"]}
+    texts_ok = all(item.get(k, "").strip() for item in pm["top5"] + props + pm["final"]["decisions"]
+                   for k in ("pro", "con"))
+    checks = {
+        "top5_is_total_return_top5": top == top_n(sc, cfg.top_n, r1),
+        "five_proposals": len(props) == cfg.n_proposals,
+        "proposals_new_and_valid": valid and len({p["id"] for p in props}) == len(props),
+        "final_follows_replacement_rule": pm["final"]["final"] == expected["final"],
+        "decision_for_each_final_and_removed": decided == set(expected["final"]) | removed,
+        "every_item_has_pro_and_con": texts_ok,
+    }
+    return _score("pm_protocol", checks, threshold, replacements=expected["replacements"])
 
 
-def momentum_reproducible(run, threshold=1.0):
-    """Re-run every momentum sub-strategy from prices.csv: monthly weights and daily returns must match the
-    saved run, and each month's compounded return must equal Σ weight × the ETF's month-over-month return."""
-    from strategy.momentum import monthly_crosscheck, run_all_momentum
-    prices, saved, mom = run.csv("prices.csv"), run.csv("returns.csv"), run.json("momentum.json")
-    if prices is None or saved is None or mom is None:
-        return _missing("momentum_reproducible", threshold, "prices.csv/returns.csv/momentum.json")
-    fresh = run_all_momentum(prices, saved_momentum_config(mom))
-    checks, details = {}, {}
-    for L, r in fresh.items():
-        name = f"MOM{L}"
-        picks_saved = [h["weights"] for h in mom["sub_strategies"][name]["history"]]
-        picks_fresh = [h["weights"] for h in r["history"]]
-        diff = float((r["returns"] - saved[name].dropna()).abs().max())
-        cross = monthly_crosscheck(prices, r)
-        checks[f"{name}_reproduces"] = picks_saved == picks_fresh and diff < 1e-10 and cross < 1e-10
-        details[name] = {"max_return_diff": diff, "monthly_crosscheck": cross, "months": len(picks_fresh)}
-        checks[f"{name}_starts_jan_2011"] = r["history"][0]["month"] == "2011-01"
-    return Score("momentum_reproducible", sum(checks.values()) / len(checks), threshold, {**checks, **details})
+def _feedback_ok(feedback):
+    """Both feedback scripts exist and cover their required topics (the same rules `write_feedback` enforces)."""
+    from strategy.agents.pm_agent import FEEDBACK_LINES, FEEDBACK_TOPICS, HARSH_CONS
+    if set(feedback) != {"constructive", "harsh"}:
+        return False
+    for kind, lines in feedback.items():
+        body = " ".join(line["text"] for line in lines).lower()
+        if not FEEDBACK_LINES[0] <= len(lines) <= FEEDBACK_LINES[1]:
+            return False
+        if not all(any(w in body for w in words) for words in FEEDBACK_TOPICS[kind].values()):
+            return False
+        if kind == "harsh" and sum(any(w in body for w in words) for words in HARSH_CONS.values()) < 2:
+            return False
+    return True
 
 
-def momentum_tool_coverage(run, threshold=1.0):
-    ok = [e for e in run.trace() if e.get("type") == "tool" and e.get("ok")]
-    lbs = {e["input"].get("lookback_months") for e in ok if e["tool"] == "run_momentum"}
-    wins = {e["input"].get("window") for e in ok if e["tool"] == "compute_comparison"}
-    checks = {f"ran_MOM{L}": L in lbs for L in MomentumConfig().lookbacks}
-    checks.update({f"compared_{w}": w in wins for w in COMPARISON_WINDOWS})
-    return Score("momentum_tool_coverage", sum(checks.values()) / len(checks), threshold, checks)
+def dialogue_complete(run, threshold=1.0):
+    dialogue, pm, research = run.json("dialogue.json"), run.json("pm.json"), run.json("research.json")
+    if dialogue is None or not pm or not research:
+        return _missing("dialogue_complete", threshold, "dialogue.json, pm.json or research.json")
+    pairs = [(d["from"], d["to"], d["round"]) for d in dialogue]
+    meeting = pm.get("meeting", [])
+    body = " ".join(line["text"] for line in meeting).lower()
+    speakers = {s: sum(line["speaker"] == s for line in meeting)
+                for s in ("Portfolio Manager Agent", "Research Agent", "Analytics Agent")}
+
+    def pros_cons(r):
+        f = research["rounds"].get(r, {}).get("findings", [])
+        return sum(x.lower().startswith("pro:") for x in f) >= 2 and sum(x.lower().startswith("con:") for x in f) >= 2
+
+    checks = {
+        "research_to_pm_round1": ("Research Agent", "Portfolio Manager Agent", 1) in pairs,
+        "pm_to_research_round1": ("Portfolio Manager Agent", "Research Agent", 1) in pairs,
+        "research_to_pm_round2": ("Research Agent", "Portfolio Manager Agent", 2) in pairs,
+        "pm_final_message": ("Portfolio Manager Agent", "All agents", 2) in pairs,
+        "findings_have_pros_and_cons": pros_cons("1") and pros_cons("2"),
+        "meeting_length": 8 <= len(meeting) <= 14,
+        "meeting_all_speakers": min(speakers.values()) >= 2,
+        "meeting_covers_objective_and_comparison": ("objective" in body or "goal" in body)
+                                                   and any(w in body for w in ("compar", "versus", " vs ")),
+        "meeting_covers_spy_and_risk": "spy" in body and ("drawdown" in body or "volatility" in body),
+        "feedback_constructive_and_harsh": _feedback_ok(pm.get("feedback", {})),
+    }
+    return _score("dialogue_complete", checks, threshold)
 
 
-def pros_cons_coverage(run, threshold=1.0):
-    """Every lookback has its Pro/Con slide with the required Cons, and a comparison slide exists (re-checked)."""
-    from strategy.agents.presentation_agent import momentum_section_problems
-    analytics, slides = run.json("analytics.json"), run.json("slides.json")
-    if not analytics or slides is None or "comparison" not in analytics:
-        return _missing("pros_cons_coverage", threshold, "momentum comparison in analytics.json / slides.json")
-    # Judge each run by the rule it was run with (v2 artifacts predate the switch and had cash rules).
-    params = (run.json("momentum.json") or {}).get("params", {})
-    cash_rules = params.get("cash_rules", True)
-    lookbacks = tuple(params.get("lookbacks", MomentumConfig().lookbacks))
-    problems = momentum_section_problems(analytics, slides, lookbacks, cash_rules=cash_rules)
-    pages = run.pdf_pages()
-    disclosures = pages[-1] if pages else ""
-    checks = {"section_complete": not problems,
-              "cost_asymmetry_disclosed": any("do not include trading costs" in p for p in pages),
-              "comparison_page_present": any("Head to Head Since 2011" in p for p in pages),
-              "momentum_detail_page_present": any("Momentum Detail" in p for p in pages),
-              # The disclosed rule must match the rule that was run.
-              "rule_disclosed_correctly": ("always fully invested" in disclosures) == (not cash_rules)}
-    return Score("pros_cons_coverage", sum(checks.values()) / len(checks), threshold,
-                 {**checks, "cash_rules": cash_rules, "problems": problems})
-
-
-# ------------------------------------------------------------- narrative/compliance
-
-def agent_texts(run):
-    """Every agent-written string that reaches the PDF, with its source."""
-    texts = []
-    for s in run.json("slides.json") or []:
-        if s.get("type") == "slide":
-            texts.append(("slide: " + s["title"], " \n".join([s["title"], *s["bullets"]])))
-    for i, f in enumerate((run.json("analytics.json") or {}).get("findings", [])):
-        texts.append((f"finding {i + 1}", f))
-    return texts
-
+# ------------------------------------------------------------------ text
 
 def narrative_faithfulness(run, threshold=1.0):
+    texts = agent_texts(run)
+    if not texts:
+        return _missing("narrative_faithfulness", threshold, "agent texts")
     index = run.number_index()
-    total, unsupported = 0, []
-    for src, text in agent_texts(run):
-        nums = list(extract_numbers(text))
-        total += len(nums)
-        for raw in unsupported_numbers(text, index):
-            unsupported.append(f"{src}: {raw}")
-    if total == 0:
-        return Score("narrative_faithfulness", 0.0, threshold, {"error": "no numbers found in narrative"})
-    return Score("narrative_faithfulness", 1 - len(unsupported) / total, threshold,
-                 {"numbers_checked": total, "unsupported": unsupported})
+    bad = {where: nums for where, t in texts if (nums := unsupported_numbers(t, index))}
+    checks = {"every_number_traceable": not bad, "texts_found": len(texts) >= 20}
+    return _score("narrative_faithfulness", checks, threshold, unsupported=bad, texts=len(texts))
 
 
 def compliance_language(run, threshold=1.0):
-    """Banned phrases anywhere agent-written, and fictional personas named outside the labeled team pages."""
-    hits = []
-    team = run.json("team.json") or {}
-    for src, text in agent_texts(run):
-        hits += [f"{src}: {p}" for p in banned_phrases(text)]
-        if src.startswith("slide"):
-            hits += [f"{src}: names persona {n} outside the labeled team pages" for n in persona_mentions(text, team)]
-    for m in team.get("members", []):
-        hits += [f"bio {m['name']}: {p}" for p in banned_phrases(m["bio"])]
-    n = len(agent_texts(run)) + len(team.get("members", []))
-    return Score("compliance_language", 1.0 if not hits else 0.0, threshold, {"texts_checked": n, "violations": hits})
+    texts = agent_texts(run)
+    team = run.json("team.json")
+    bios = [("bio", m["bio"]) for m in (team or {}).get("members", [])]
+    banned = {where: hits for where, t in texts + bios if (hits := banned_phrases(t))}
+    personas = {where: hits for where, t in texts if (hits := persona_mentions(t, team))}
+    checks = {"no_banned_phrases": not banned, "no_persona_names_outside_team_pages": not personas}
+    return _score("compliance_language", checks, threshold, banned=banned, personas=personas)
+
+
+# ------------------------------------------------------------------ harness
+
+def cost_accounting(run, threshold=1.0):
+    m = run.json("manifest.json")
+    if not m or "cost_by_tool" not in m:
+        return _missing("cost_accounting", threshold, "manifest cost_by_tool")
+    tool_cost = sum(r["cost_usd"] for r in m["cost_by_tool"].values())
+    agent_cost = sum(m["cost_by_agent_usd"].values())
+    tool_tokens = sum(r["input_tokens"] + r["output_tokens"] for r in m["cost_by_tool"].values())
+    total_tokens = sum(m["usage_tokens"].values())
+    rounding = 0.0001 * (len(m["cost_by_tool"]) + 1)
+    checks = {
+        "tool_costs_sum_to_total": abs(tool_cost - m["cost_usd"]) <= rounding + 1e-9,
+        "agent_costs_sum_to_total": abs(agent_cost - m["cost_usd"]) <= 0.0001 * (len(m["cost_by_agent_usd"]) + 1),
+        "tool_tokens_sum_to_total": abs(tool_tokens - total_tokens) <= 2 * len(m["cost_by_tool"]),
+        "every_agent_has_call_counts": set(AGENT_NAMES) <= set(m.get("tool_calls", {})),
+    }
+    return _score("cost_accounting", checks, threshold, tool_cost=tool_cost, total=m["cost_usd"])
+
+
+HOOK_ATTACKS = [("save_note", {"path": "../outside.txt"}), ("save_note", {"path": "C:/Windows/system32/x.txt"}),
+                ("save_note", {"path": "~/secrets.txt"}), ("delete_run", {}),
+                ("run", {"cmd": "rm -rf runs"}), ("run", {"cmd": "import shutil; shutil.rmtree('data')"})]
+HOOK_BENIGN = [("add_slide", {"title": "50/30/20 in SPY/QQQ", "bullets": ["The PM removed one strategy."]}),
+               ("save_note", {"path": "runs/x/notes.md"})]
+
+
+def hook_enforcement(run, threshold=1.0):
+    m = run.json("manifest.json")
+    if not m:
+        return _missing("hook_enforcement", threshold, "manifest.json")
+    hooks = m.get("hooks") or {}
+    live = default_hooks()
+    attacks_blocked = all(live.before("eval", t, i) for t, i in HOOK_ATTACKS)
+    benign_allowed = not any(live.before("eval", t, i) for t, i in HOOK_BENIGN)
+    # No successful tool call in this run carried an input that the hooks would have denied.
+    leaked = [e["tool"] for e in run.trace() if e.get("type") == "tool" and e.get("ok")
+              and live.before(e["agent"], e["tool"], e.get("input") or {})]
+    checks = {"pre_hooks_installed": {"forbid_delete", "confine_paths"} <= set(hooks.get("pre", [])),
+              "attacks_blocked": attacks_blocked, "benign_allowed": benign_allowed, "no_denied_input_ran": not leaked}
+    return _score("hook_enforcement", checks, threshold, denials=len(hooks.get("denials", [])), leaked=leaked)
+
+
+# ------------------------------------------------------------------ PDF
+
+def pdf_structure(run, threshold=1.0):
+    pages, deck = run.pdf_pages(), run.json("deck.json")
+    if not pages or not deck:
+        return _missing("pdf_structure", threshold, "presentation.pdf or deck.json")
+    from pypdf import PdfReader
+    meta_title = PdfReader(str(run.dir / "presentation.pdf")).metadata.title
+    sections = {s["section"] for s in deck["slides"]}
+    # Titles and bullets, exactly the text the Presentation Agent's build-time rule checks (a trial failed when the
+    # scorer read bullets only and "Diversifying" was in the title).
+    div_text = " ".join(" ".join([s["title"], *s["bullets"]]) for s in deck["slides"]
+                        if s["section"] == "diversification").lower()
+    table_pages = [p for p in pages if p.lstrip().startswith(TABLE_PAGE_PREFIX)]
+    checks = {
+        "title": meta_title == TITLE and TITLE in pages[0],
+        "first_page_explains_agents": "How AI agents produced this presentation" in pages[0]
+                                      and "back-and-forth" in pages[0],
+        "flowchart_page": any("The Agentic Workflow" in p for p in pages[1:3]),
+        "harness_and_hooks_page": any("The Harness" in p and "Hooks" in p for p in pages),
+        "guardrails_and_evals_page": any("Guardrails and Evals" in p for p in pages),
+        "simulated_meeting_page": sum("simulated conversation" in p for p in pages) == 1,
+        "feedback_pages": sum(p.lstrip().startswith("Constructive Feedback") for p in pages) == 1
+                          and sum(p.lstrip().startswith("Harsh Feedback") for p in pages) == 1,
+        "decision_log_both_rounds": any("Decision Log, Round 1" in p for p in pages)
+                                    and any("Decision Log, Round 2" in p for p in pages),
+        "analysis_tables_two_pages": len(table_pages) == 2,
+        "every_section_present": set(SECTIONS) <= sections,
+        "diversification_marketing": "diversif" in div_text,
+        "team_pages": sum("Digital Investment Team" in p for p in pages) == 2,
+        "disclosures_last": "Important Disclosures" in pages[-1],
+        "page_count": 16 <= len(pages) <= 32,
+    }
+    return _score("pdf_structure", checks, threshold, pages=len(pages), table_pages=len(table_pages))
 
 
 def pdf_disclosures(run, threshold=1.0):
     pages = run.pdf_pages()
     if not pages:
         return _missing("pdf_disclosures", threshold, "presentation.pdf")
-    slides = run.json("slides.json") or []
-    perf_key, gen_key = PERF_FOOTER[:45], GEN_FOOTER[:30]
-    # Page 1 is the cover. Each slide/standard page then maps to one page, except team, which spans two.
-    expected = []
-    for s in slides:
-        perf = s.get("performance", s["type"] in ("metrics_table", "in_sample_comparison"))
-        expected += [perf] * (2 if s["type"] == "team" else 1)
-    body = pages[1:1 + len(expected)]
-    missing = [i + 2 for i, (want, text) in enumerate(zip(expected, body)) if want and perf_key not in text]
-    unfootered = [i + 2 for i, text in enumerate(body) if perf_key not in text and gen_key not in text]
+    perf = "Hypothetical backtested performance"
+    numeric = [i for i, p in enumerate(pages[1:-1], start=1) if re.search(r"\d+\.\d%", p)]
+    last = pages[-1]
     checks = {
-        "every_performance_page_has_disclosure": not missing,
-        "every_page_has_a_footer": not unfootered,
-        "disclosures_page_last": "Important Disclosures" in pages[-1] and "Hypothetical performance" in pages[-1],
-        "in_sample_labeled": any("IN-SAMPLE" in p for p in pages),
-        "cover_marks_hypothetical": "Hypothetical backtested" in pages[0],
-        "cost_assumption_stated": bool(re.search(r"\d+(\.\d+)? basis points per full switch", pages[-1])),
-        "partial_year_labeled_ytd": _partial_year_ok(run, pages),
+        "perf_footer_on_every_numeric_page": all(perf in pages[i] for i in numeric),
+        "footer_on_every_page": all(("For discussion purposes only" in p) or (perf in p) for p in pages),
+        "costs_disclosed": "exclude trading costs" in last,
+        "hindsight_disclosed": "hindsight" in last,
+        "simulated_and_ai_disclosed": "simulated" in last and FICTIONAL_LABEL in last,
+        "hypothetical_on_first_page": "Hypothetical backtested results" in pages[0],
     }
-    return Score("pdf_disclosures", sum(checks.values()) / len(checks), threshold,
-                 {**checks, "pages_missing_disclosure": missing})
-
-
-def _partial_year_ok(run, pages):
-    """If the deck shows calendar-year results and the last year is incomplete, it must say YTD."""
-    returns = run.csv("returns.csv")
-    if returns is None:
-        return False
-    end = returns.index.max()
-    partial = (end.month, end.day) < (12, 24)
-    shows_years = any("calendar" in p.lower() for p in pages)
-    return not (partial and shows_years) or any("YTD" in p or "year-to-date" in p.lower() for p in pages)
-
-
-def balance_and_traceability(run, threshold=1.0):
-    """The pitch acknowledges every window where the strategy did worse than SPY, and every
-    agent-cited figure appears in a code-generated table of the PDF."""
-    from strategy.agents.presentation_agent import unacknowledged_adverse
-    analytics, slides = run.json("analytics.json"), run.json("slides.json") or []
-    pages = run.pdf_pages()
-    if not analytics or not pages:
-        return _missing("balance_and_traceability", threshold, "analytics.json/presentation.pdf")
-    unack = unacknowledged_adverse(analytics, slides)
-    # Traceability: numbers on agent slides must appear verbatim on a code-generated table page,
-    # identified by its known header (not by excluding agent titles, which can overlap with headers).
-    # pypdf's text order varies per page (a table can be extracted before its header), so match anywhere.
-    table_text = " ".join(p for p in pages if any(t in p for t in CODE_PAGE_TITLES))
-    untraced = []
-    for s in slides:
-        if s["type"] != "slide":
-            continue
-        for value, decimals, raw, unit in extract_numbers(" ".join(s["bullets"])):
-            if unit == "%" and decimals == 1 and raw.lstrip("-−+") not in table_text:
-                untraced.append(f"{s['title']}: {raw}")
-    checks = {"adverse_windows_acknowledged": not unack, "cited_percentages_traceable": not untraced}
-    return Score("balance_and_traceability", sum(checks.values()) / len(checks), threshold,
-                 {**checks, "unacknowledged": unack, "untraced": untraced[:15]})
+    return _score("pdf_disclosures", checks, threshold, numeric_pages=len(numeric))
 
 
 def team_quality(run, threshold=1.0):
@@ -314,60 +412,15 @@ def team_quality(run, threshold=1.0):
         "careers_plausible": all(plausible),
         "certified_members": sum(bool(m["certifications"]) for m in members) >= 3,
         "fictional_label_on_every_card": sum(p.count(FICTIONAL_LABEL) for p in pages) >= 6,
-        "team_pages_in_pdf": sum("Digital Investment Team" in p for p in pages) == 2,
         "team_page_titles_say_fictional": sum("Digital Investment Team" in p and "(AI-generated, fictional)" in p
                                               for p in pages) == 2,
     }
-    return Score("team_quality", sum(checks.values()) / len(checks), threshold, {**checks, "validation_error": err})
+    return _score("team_quality", checks, threshold, validation_error=err)
 
 
-def pdf_structure(run, threshold=1.0):
-    p = run.dir / "presentation.pdf"
-    if not p.exists():
-        return _missing("pdf_structure", threshold, "presentation.pdf")
-    import pymupdf
-    doc = pymupdf.open(str(p))
-    images = sum(len(page.get_images()) for page in doc)
-    pages = run.pdf_pages()
-    text = " ".join(pages).lower()
-    slides = run.json("slides.json") or []
-    checks = {
-        "page_count_14_to_36": 14 <= len(pages) <= 36,
-        "at_least_5_charts": images >= 5,
-        "has_metrics_table": "risk and return by period" in text,
-        "mentions_spy_comparison": text.count("spy") >= 10,
-        "covers_all_periods": all(w.lower() in text for w in ("3M", "1Y", "3Y", "5Y")),
-        "discusses_tradeoffs": any(k in text for k in ("lag", "underperform", "trade-off", "tradeoff")),
-        "agent_slides_11_to_22": 11 <= sum(s["type"] == "slide" for s in slides) <= 22,
-        "covers_all_lookbacks": all(f"{L}-month" in text for L in MomentumConfig().lookbacks),
-        "qqq_benchmark_shown": text.count("qqq") >= 10,
-    }
-    return Score("pdf_structure", sum(checks.values()) / len(checks), threshold,
-                 {**checks, "pages": len(pages), "images": images})
-
-
-def run_health(run, threshold=1.0, max_cost_usd=15.0):
-    m = run.json("manifest.json") or {}
-    trace = run.trace()
-    tools = [e for e in trace if e.get("type") == "tool"]
-    errors = [e for e in tools if not e.get("ok")]
-    agents = {e["agent"] for e in trace if e.get("type") == "finish"}
-    checks = {
-        "status_ok": m.get("status") == "ok",
-        "all_five_agents_finished": {"Data Agent", "Backtest Agent", "Analytics Agent", "Team Agent",
-                                     "Presentation Agent"} <= agents,
-        "no_tool_crashes": not any(e.get("type") == "tool_crash" for e in trace),
-        "cost_under_cap": (m.get("cost_usd") or 0) <= max_cost_usd,
-    }
-    return Score("run_health", sum(checks.values()) / len(checks), threshold,
-                 {**checks, "cost_usd": m.get("cost_usd"), "seconds": m.get("seconds"),
-                  "tool_calls": len(tools), "tool_errors_self_corrected": len(errors)})
-
-
-SCORERS = [run_health, data_integrity, backtest_tool_coverage, backtest_reproducible, momentum_reproducible,
-           momentum_tool_coverage, pros_cons_coverage, analytics_consistency,
-           narrative_faithfulness, compliance_language, pdf_disclosures, balance_and_traceability, team_quality,
-           pdf_structure]
+SCORERS = [run_health, data_integrity, research_coverage, research_reproducible, notebook_crosscheck, pm_protocol,
+           dialogue_complete, narrative_faithfulness, compliance_language, cost_accounting, hook_enforcement,
+           pdf_structure, pdf_disclosures, team_quality]
 
 
 def score_run(path):

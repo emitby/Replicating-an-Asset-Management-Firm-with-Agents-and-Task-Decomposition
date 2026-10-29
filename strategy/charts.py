@@ -1,4 +1,9 @@
-"""Chart rendering (matplotlib, headless).
+"""Chart rendering (matplotlib, headless), from saved run artifacts only.
+
+Every chart is drawn from a `ChartData` bundle loaded from the run folder
+(strategy_returns.csv, research.json, pm.json, analytics.json), never from
+live agent state. That is what lets ``build-pdf`` re-render the whole deck,
+charts included, after a run, without any agent or API call.
 
 Guardrail: matplotlib keeps a config/font cache in MPLCONFIGDIR. The launchers
 (run.ps1 / run.sh) point it at <project>/.cache/matplotlib. Rendering refuses
@@ -9,38 +14,68 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+from dataclasses import dataclass  # noqa: E402
+from pathlib import Path  # noqa: E402
+
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.ticker as mtick  # noqa: E402
 import numpy as np  # noqa: E402
-from matplotlib.patches import Patch  # noqa: E402
-from pathlib import Path  # noqa: E402
+import pandas as pd  # noqa: E402
 
 from strategy.analytics import drawdown_series  # noqa: E402
 from strategy.paths import PROJECT_DIR, confine  # noqa: E402
 
-COLORS = {"Strategy": "#1f4e79", "SPY": "#c55a11", "60/40": "#7f7f7f", "MA Strategy": "#1f4e79",
-          "QQQ": "#000000", "MOM1": "#e377c2", "MOM3": "#17becf", "MOM6": "#2e9e6b", "MOM12": "#7030a0",
-          "MOM24": "#bf9000"}
-# Distinct hues per asset (an earlier palette made SPY/QQQ/GLD look alike); cash is light grey and hatched.
-ASSET_COLORS = {"SPY": "#d62728", "QQQ": "#9467bd", "IWM": "#2ca02c", "TLT": "#1f3a93", "IEF": "#17becf",
-                "GLD": "#ffbf00", "CASH": "#d9d9d9"}
-CHART_KINDS = ("equity_vs_spy", "drawdowns", "rolling_1y", "allocation", "window_returns",
-               "ma_selection", "calendar_years",
-               "momentum_vs_benchmarks", "momentum_drawdowns", "momentum_allocations", "comparison_returns")
-MOMENTUM_CHARTS = ("momentum_vs_benchmarks", "momentum_drawdowns", "momentum_allocations", "comparison_returns")
+FINAL_COLORS = ("#1f4e79", "#2e9e6b", "#7030a0", "#bf9000", "#17becf")
+BENCH_COLORS = {"SPY": "#c55a11", "QQQ": "#000000"}
+CHART_KINDS = ("growth_final", "drawdowns_final", "round1_heatmap", "rounds_bars", "correlation", "blend")
+REQUIRED_CHARTS = ("growth_final", "drawdowns_final", "round1_heatmap", "rounds_bars", "correlation")
 
 
 class ChartError(ValueError):
-    pass
+    """An unknown chart kind or a cache outside the project."""
+
+
+@dataclass
+class ChartData:
+    """Everything the charts need, loaded from one run folder.
+
+    Attributes:
+        returns: daily returns over the scored window (strategy ids, SPY, QQQ, rf).
+        scores: risk/return table (rows: strategy ids, SPY, QQQ).
+        specs: id -> strategy dict (portfolio, sma, lookback_days, signal, label).
+        pm: pm.json (top5, proposals, final).
+        analytics: analytics.json (portfolio_fit for the correlation and blend charts).
+        round1_ids: the round-1 grid ids, in table order.
+    """
+    returns: pd.DataFrame
+    scores: pd.DataFrame
+    specs: dict
+    pm: dict
+    analytics: dict
+    round1_ids: list
+
+    @property
+    def final(self):
+        """The final strategy ids, best total return first."""
+        return self.pm["final"]["final"]
+
+    def short(self, sid):
+        """Compact legend label, e.g. ``Top 3 | 200d SMA | 180d``."""
+        if sid not in self.specs:
+            return sid
+        s = self.specs[sid]
+        return f"{s['portfolio'].replace('Long top 3, short negatives', 'Long/short')} | {s['signal']} | {s['lookback_days']}d"
 
 
 def assert_cache_confined():
+    """Refuse to render if matplotlib's config or cache directory is outside the project."""
     for d in (matplotlib.get_configdir(), matplotlib.get_cachedir()):
         if not Path(d).resolve().is_relative_to(PROJECT_DIR):
             raise ChartError(f"matplotlib cache is outside the project ({d}). Run via run.ps1 / run.sh.")
 
 
 def _style(ax, title, pct_y=True):
+    """Shared axis styling: left title, no top/right spines, light grid, % y-axis by default."""
     ax.set_title(title, loc="left", fontsize=13, fontweight="bold", color="#222222")
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", alpha=0.25)
@@ -50,6 +85,7 @@ def _style(ax, title, pct_y=True):
 
 
 def _save(fig, out_dir, kind):
+    """Save a figure as <out_dir>/<kind>.png (confined to the project) and close it."""
     path = confine(Path(out_dir) / f"{kind}.png")
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160, bbox_inches="tight")
@@ -57,188 +93,113 @@ def _save(fig, out_dir, kind):
     return path
 
 
-def render(kind, out_dir, returns, analytics=None, history=None):
+def render(kind, out_dir, data):
+    """Render one chart.
+
+    Args:
+        kind: one of `CHART_KINDS`.
+        out_dir: folder for the PNG (inside the project).
+        data: a `ChartData` bundle.
+
+    Returns:
+        The PNG path.
+
+    Raises:
+        ChartError: unknown kind, or matplotlib's cache is outside the project.
+    """
     assert_cache_confined()
     if kind not in CHART_KINDS:
         raise ChartError(f"Unknown chart {kind!r}. Available: {list(CHART_KINDS)}.")
     fig, ax = plt.subplots(figsize=(9, 6.2))   # matches the slide's chart area, so no dead space
-    series = ["Strategy", "SPY", "60/40"]
+    r = data.returns
+    colors = dict(zip(data.final, FINAL_COLORS)) | BENCH_COLORS
 
-    if kind == "equity_vs_spy":
-        for s in series:
-            ax.plot((1 + returns[s]).cumprod() * 10_000, label=s, color=COLORS[s],
-                    lw=2.2 if s == "Strategy" else 1.4)
+    if kind == "growth_final":
+        for s in [*data.final, "SPY", "QQQ"]:
+            ax.plot((1 + r[s]).cumprod() * 10_000, label=data.short(s) if s in data.specs else f"{s} buy & hold",
+                    color=colors[s], lw=1.4 if s in BENCH_COLORS else 2.0, ls="--" if s in BENCH_COLORS else "-")
         ax.set_yscale("log")
         ax.yaxis.set_major_locator(mtick.LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
         ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
         ax.yaxis.set_minor_formatter(mtick.NullFormatter())
-        _style(ax, "Growth of $10,000 (log scale, walk-forward out-of-sample)", pct_y=False)
-        ax.legend(frameon=False)
-    elif kind == "drawdowns":
-        spy_dd, strat_dd = drawdown_series(returns["SPY"]), drawdown_series(returns["Strategy"])
-        ax.fill_between(spy_dd.index, spy_dd, 0, color=COLORS["SPY"], alpha=0.18, lw=0)
-        ax.plot(spy_dd, color=COLORS["SPY"], lw=1.0, label="SPY")
-        ax.plot(strat_dd, color=COLORS["Strategy"], lw=1.6, label="Strategy")
-        _style(ax, "Drawdown from peak")
-        ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncols=2)
-    elif kind == "rolling_1y":
-        roll = (1 + returns[["Strategy", "SPY"]]).rolling(252).apply(lambda x: x.prod(), raw=True) - 1
-        for s in ("Strategy", "SPY"):
-            ax.plot(roll[s], label=s, color=COLORS[s], lw=1.6)
-        ax.axhline(0, color="#999999", lw=0.8)
-        _style(ax, "Rolling 1-year return")
-        ax.legend(frameon=False)
-    elif kind == "allocation":
-        w = returns["w_spy"]
-        ax.fill_between(w.index, w, 0, step="post", color=COLORS["SPY"], alpha=0.75, label="SPY")
-        ax.fill_between(w.index, w, 1, step="post", color="#5b9bd5", alpha=0.75, label="IEF")
-        ax.set_ylim(0, 1)
-        _style(ax, "Allocation over time (SPY vs IEF)")
-        ax.legend(frameon=False, loc="lower left", ncols=2)
-    elif kind == "window_returns":
-        if not analytics:
-            raise ChartError("window_returns needs analytics.")
-        labels = [w for w in ("3M", "1Y", "3Y", "5Y") if w in analytics["windows"]]
-        width = 0.26
-        for i, s in enumerate(series):
-            vals = []
-            for w in labels:
-                m = analytics["windows"][w]["series"][s]
-                vals.append(m.get("cagr", m["total_return"]))
-            xs = [x + (i - 1) * width for x in range(len(labels))]
-            bars = ax.bar(xs, vals, width, label=s, color=COLORS[s])
-            ax.bar_label(bars, labels=[f"{v:.1%}" for v in vals], fontsize=8, padding=2)
-        ax.set_xticks(range(len(labels)), [f"{w}{' (ann.)' if analytics['windows'][w]['annualized'] else ''}" for w in labels])
-        ax.axhline(0, color="#999999", lw=0.8)
-        _style(ax, "Trailing returns: 3M total, 1Y/3Y/5Y annualized")
-        ax.legend(frameon=False)
-    elif kind == "ma_selection":
-        if not history:
-            raise ChartError("ma_selection needs the selection history.")
-        years = [h["year"] for h in history]
-        chosen = [h["chosen_ma"] for h in history]
-        ax.step(years, chosen, where="mid", color=COLORS["Strategy"], lw=2)
-        ax.scatter(years, chosen, color=COLORS["Strategy"], zorder=3)
-        ax.set_yscale("log")
-        ax.set_yticks([5, 20, 50, 200], ["5-day", "20-day", "50-day", "200-day"])
-        ax.minorticks_off()
-        ax.xaxis.set_major_locator(mtick.MaxNLocator(integer=True))
-        _style(ax, "Moving average chosen each year (walk-forward, prior data only)", pct_y=False)
-    elif kind == "calendar_years":
-        yearly = (1 + returns[["Strategy", "SPY"]]).groupby(returns.index.year).prod() - 1
-        xs = range(len(yearly))
-        ax.bar([x - 0.2 for x in xs], yearly["Strategy"], 0.4, label="Strategy", color=COLORS["Strategy"])
-        ax.bar([x + 0.2 for x in xs], yearly["SPY"], 0.4, label="SPY", color=COLORS["SPY"])
-        end = returns.index.max()
-        labels = [f"{y} YTD" if (y == end.year and (end.month, end.day) < (12, 24)) else str(y) for y in yearly.index]
-        ax.set_xticks(list(xs), labels, rotation=45, fontsize=8)
-        ax.axhline(0, color="#999999", lw=0.8)
-        _style(ax, "Calendar-year returns (final year is year-to-date)" if "YTD" in labels[-1] else "Calendar-year returns")
-        ax.legend(frameon=False)
-    elif kind in MOMENTUM_CHARTS:
-        if kind in ("momentum_allocations", "momentum_drawdowns"):    # need their own grid of subplots
-            plt.close(fig)
-            fig = _allocations_chart(returns) if kind == "momentum_allocations" else _drawdowns_chart(returns)
-        else:
-            _momentum_chart(kind, ax, returns, analytics)
+        _style(ax, "Growth of $10,000: final strategies vs SPY and QQQ (log scale)", pct_y=False)
+        ax.legend(fontsize=8.5, frameon=False, loc="upper left")
+        ax.set_xlabel("Hypothetical backtest; no trading costs", fontsize=8.5, color="#595959")
+
+    elif kind == "drawdowns_final":
+        fig.set_size_inches(9, 6.2)
+        for s in [*data.final, "SPY"]:
+            dd = drawdown_series(r[s])
+            ax.plot(dd, color=colors[s], lw=1.2 if s != "SPY" else 2.2, alpha=0.85 if s != "SPY" else 1.0,
+                    label=data.short(s) if s in data.specs else "SPY buy & hold", zorder=3 if s == "SPY" else 2)
+        _style(ax, "Drawdown from peak: final strategies vs SPY")
+        # Legend below the plot: inside, it covered the deepest troughs (visual review).
+        ax.legend(fontsize=8.5, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.07), ncol=3)
+
+    elif kind == "round1_heatmap":
+        specs = [data.specs[i] for i in data.round1_ids]
+        rows = list(dict.fromkeys((s["portfolio"], s["signal"]) for s in specs))
+        cols = sorted({s["lookback_days"] for s in specs})
+        grid = np.full((len(rows), len(cols)), np.nan)
+        for sid, s in zip(data.round1_ids, specs):
+            grid[rows.index((s["portfolio"], s["signal"])), cols.index(s["lookback_days"])] = data.scores.at[sid, "excess_vs_spy"]
+        lim = np.nanmax(np.abs(grid))
+        im = ax.imshow(grid, cmap="RdBu", vmin=-lim, vmax=lim, aspect="auto")
+        for i in range(len(rows)):
+            for j in range(len(cols)):
+                v = grid[i, j]
+                ax.text(j, i, f"{v * 100:+.0f}%", ha="center", va="center", fontsize=7.5,
+                        color="white" if abs(v) > lim * 0.6 else "#222222")
+        ax.set_xticks(range(len(cols)), [f"{c}d" for c in cols])
+        ax.set_yticks(range(len(rows)), [f"{p.replace('Long top 3, short negatives', 'Long/short')} | {sig}" for p, sig in rows],
+                      fontsize=8)
+        ax.set_xlabel("Trailing lookback (calendar days)", fontsize=9)
+        ax.set_title(f"Round 1: total return minus SPY's, all {len(specs)} strategies", loc="left",
+                     fontsize=13, fontweight="bold", color="#222222")
+        fig.colorbar(im, ax=ax, format=mtick.PercentFormatter(1.0, decimals=0), shrink=0.8)
+
+    elif kind == "rounds_bars":
+        top = [p["id"] for p in data.pm["top5"]]
+        props = [p["id"] for p in data.pm["proposals"]]
+        ids = [*top, *props]
+        vals = [data.scores.at[i, "total_return"] for i in ids]
+        bar_colors = ["#1f4e79"] * len(top) + ["#c55a11"] * len(props)
+        y = np.arange(len(ids))[::-1]
+        ax.barh(y, vals, color=bar_colors)
+        ax.set_yticks(y, [f"{data.short(i)}{'  (final)' if i in data.final else ''}" for i in ids], fontsize=8.5)
+        for b, c in (("SPY", BENCH_COLORS["SPY"]), ("QQQ", BENCH_COLORS["QQQ"])):
+            ax.axvline(data.scores.at[b, "total_return"], color=c, ls="--", lw=1.4, label=f"{b} buy & hold")
+        ax.xaxis.set_major_formatter(mtick.PercentFormatter(1.0, decimals=0))
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="x", alpha=0.25)
+        ax.set_title("Total return: round-1 top 5 (blue) and PM proposals (orange)", loc="left", fontsize=13,
+                     fontweight="bold", color="#222222")
+        ax.legend(fontsize=8.5, frameon=False, loc="lower right")
+
+    elif kind == "correlation":
+        corr = data.analytics["portfolio_fit"]["correlation"]
+        assets = list(next(iter(corr.values())))
+        width = 0.8 / len(data.final)
+        for i, sid in enumerate(data.final):
+            ax.bar(np.arange(len(assets)) + (i - (len(data.final) - 1) / 2) * width,
+                   [corr[sid][a] for a in assets], width, color=colors[sid], label=data.short(sid))
+        ax.set_xticks(range(len(assets)), assets)
+        ax.axhline(0, color="#888888", lw=0.8)
+        ax.set_ylim(-1, 1)
+        _style(ax, "Correlation of daily returns with core asset classes", pct_y=False)
+        ax.legend(fontsize=8.5, frameon=False, loc="upper right")
+
+    elif kind == "blend":
+        fit = data.analytics["portfolio_fit"]
+        w = round(fit["blend_weight"] * 100)
+        names = ["SPY alone", *[data.short(s) for s in data.final]]
+        metrics = [fit["spy"], *[fit["blends"][s] for s in data.final]]
+        x = np.arange(len(names))
+        ax.bar(x - 0.2, [m["cagr"] for m in metrics], 0.4, color="#1f4e79", label="Annual return")
+        ax.bar(x + 0.2, [m["max_drawdown"] for m in metrics], 0.4, color="#c55a11", label="Max drawdown")
+        ax.set_xticks(x, names, rotation=20, ha="right", fontsize=8)
+        ax.axhline(0, color="#888888", lw=0.8)
+        _style(ax, f"{100 - w}% SPY + {w}% strategy vs SPY alone (rebalanced daily)")
+        ax.legend(fontsize=8.5, frameon=False)
+
     return _save(fig, out_dir, kind)
-
-
-def _momentum_series(returns):
-    moms = sorted((c for c in returns.columns if c.startswith("MOM") and c[3:].isdigit()), key=lambda c: int(c[3:]))
-    if not moms:
-        raise ChartError("Momentum returns are missing.")
-    return moms
-
-
-def _momentum_frame(returns):
-    moms = _momentum_series(returns)
-    return returns.dropna(subset=moms).rename(columns={"Strategy": "MA Strategy"}), moms
-
-
-def _momentum_chart(kind, ax, returns, analytics):
-    df, moms = _momentum_frame(returns)
-    bench = [b for b in ("SPY", "QQQ") if b in df.columns]
-    lines = [*moms, "MA Strategy", *bench]
-    style = lambda s: dict(color=COLORS[s], ls="--" if s == "MA Strategy" else "-",
-                           lw=2.4 if s in ("SPY", "QQQ") else 1.9 if s == "MA Strategy" else 1.4)
-    if kind == "momentum_vs_benchmarks":
-        for s in lines:
-            ax.plot((1 + df[s]).cumprod() * 10_000, label=s, **style(s))
-        ax.set_yscale("log")
-        ax.yaxis.set_major_locator(mtick.LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
-        ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
-        ax.yaxis.set_minor_formatter(mtick.NullFormatter())
-        _style(ax, f"Growth of $10,000 since {df.index.min():%b %Y}: momentum vs SPY and QQQ (log scale)", pct_y=False)
-        ax.legend(frameon=False, ncols=4, loc="upper left", fontsize=9)
-    elif kind == "comparison_returns":
-        comp = (analytics or {}).get("comparison", {}).get("windows")
-        if not comp:
-            raise ChartError("comparison_returns needs the comparison analytics.")
-        wins = [w for w in ("3M", "1Y", "3Y", "5Y", "S2011") if w in comp]
-        width = 0.8 / len(lines)
-        for i, s in enumerate(lines):
-            vals = [comp[w]["series"][s].get("cagr", comp[w]["series"][s]["total_return"]) for w in wins]
-            xs = [x + (i - (len(lines) - 1) / 2) * width for x in range(len(wins))]
-            ax.bar(xs, vals, width, label=s, color=COLORS[s], edgecolor="white", lw=0.4,
-                   hatch="//" if s == "MA Strategy" else None)
-        labels = {"S2011": "Since 2011"}
-        ax.set_xticks(range(len(wins)), [f"{labels.get(w, w)}{' (ann.)' if comp[w]['annualized'] else ''}" for w in wins])
-        ax.axhline(0, color="#999999", lw=0.8)
-        _style(ax, "Returns by period: momentum lookbacks vs MA strategy, SPY and QQQ")
-        ax.legend(frameon=False, ncols=8, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.08))
-
-
-def _drawdowns_chart(returns):
-    """Two panels on a shared scale: momentum lookbacks (top) and MA / SPY / QQQ (bottom).
-    One panel with 8 lines was illegible: the thick benchmark lines buried the lookbacks."""
-    df, moms = _momentum_frame(returns)
-    bench = ["MA Strategy", *(b for b in ("SPY", "QQQ") if b in df.columns)]
-    fig, (top, bottom) = plt.subplots(2, 1, figsize=(9, 6.2), sharex=True, sharey=True)
-    for ax, group, title in ((top, moms, "Momentum lookbacks"), (bottom, bench, "MA strategy and benchmarks")):
-        for s in group:
-            ax.plot(drawdown_series(df[s]), label=s, color=COLORS[s], lw=1.4,
-                    ls="--" if s == "MA Strategy" else "-")
-        _style(ax, f"{title}: drawdown from peak since {df.index.min():%b %Y}")
-        ax.title.set_fontsize(11)
-        ax.legend(frameon=False, loc="lower left", ncols=len(group), fontsize=8)
-        ax.tick_params(labelbottom=True)          # shared x-axis: keep year labels on the top panel too
-    fig.subplots_adjust(hspace=0.35, left=0.08, right=0.98, top=0.94, bottom=0.06)
-    return fig
-
-
-def _allocations_chart(returns):
-    """Small multiples: monthly target weights per lookback, stacked; cash hatched grey."""
-    df, moms = _momentum_frame(returns)
-    assets = list(ASSET_COLORS)
-    fig, axes = plt.subplots(len(moms), 1, figsize=(9, 6.2), sharex=True)
-    for ax, s in zip(np.atleast_1d(axes), moms):
-        cols = {a: f"w_{s}_{a}" for a in assets if f"w_{s}_{a}" in df.columns}
-        w = df[list(cols.values())].rename(columns={v: k for k, v in cols.items()})
-        mw = w.groupby(w.index.to_period("M")).first()
-        x = np.arange(len(mw))
-        bottom = np.zeros(len(mw))
-        for a in assets:
-            if a not in mw.columns:
-                continue
-            ax.bar(x, mw[a].values, 1.0, bottom=bottom, color=ASSET_COLORS[a], lw=0,
-                   hatch="////" if a == "CASH" else None, edgecolor="#595959" if a == "CASH" else None)
-            bottom += mw[a].values
-        ax.set_ylim(0, 1)
-        ax.set_xlim(-0.5, len(mw) - 0.5)
-        ax.set_yticks([])
-        ax.set_ylabel(f"{s[3:]}-month", rotation=0, ha="right", va="center", fontsize=9)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-    months = mw.index
-    ticks = [i for i, m in enumerate(months) if m.month == 1]
-    axes[-1].set_xticks(ticks, [str(months[i].year) for i in ticks], fontsize=8, rotation=45)
-    any_cash = any(f"w_{s}_CASH" in df.columns and (df[f"w_{s}_CASH"] > 0).any() for s in moms)
-    axes[0].set_title("Monthly weights by lookback (50/30/20 in the top three" +
-                      ("; hatched grey = cash)" if any_cash else "; always fully invested)"),
-                      loc="left", fontsize=12, fontweight="bold")
-    fig.legend(handles=[Patch(facecolor=ASSET_COLORS[a], edgecolor="#595959", label=a,
-                              hatch="////" if a == "CASH" else None) for a in assets if a != "CASH" or any_cash],
-               frameon=False, loc="lower center", ncols=7, fontsize=9)
-    fig.subplots_adjust(hspace=0.12, bottom=0.14, left=0.1, right=0.98, top=0.93)
-    return fig

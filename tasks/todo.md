@@ -1,3 +1,51 @@
+# Task 5: Agentic Capital Management (SMA-ranking strategy + Portfolio Manager loop)
+
+Plan: `C:\Users\emitb\.claude\plans\virtual-baking-biscuit.md`. Decisions: round 1 = all 84 notebook strategies (56 long-only + 28 long/short); a round-2 strategy replaces the weakest top-5 when it beats it on total return; obsolete files removed with `git rm` (one-time user OK); hooks = runtime pre/post tool hooks + process audit hook + Claude Code PreToolUse hook.
+
+- [x] 1. `ranking.py` engine ported from notebook cells 25/27; tests match the notebook's printed returns
+- [x] 2. config/data/context; Research Agent; PM Agent (code-fixed top 5, validated proposals, replacement rule); harness stages
+- [x] 3. hooks.py (pre/post tool hooks), sandbox.py (audit hook), per-tool cost and token accounting
+- [x] 4a. one-page simulated meeting: PM Agent and analyst agents (Research, Analytics) on what is compared, the objective, and why the strategies were picked (user, mid-task); written by the PM Agent from real results, number-checked, labelled simulated
+- [x] 4. analytics (final 5 + SPY/QQQ, correlations, blends), charts, PDF ("Agentic Capital Management Strategy Presentation"), Presentation Agent; <=2 table pages enforced
+- [x] 4b. PDF independent of the pipeline (user, mid-task): agents save all deck content to `deck.json`; `build-pdf runs/<id>` re-renders from saved artifacts with no agents or API calls, so the deck can be edited and rebuilt
+- [x] 5. evals: scorers, red-team, independent cross-check, token profile/chart for 6 agents
+- [x] 6. `git rm` obsolete files; Claude Code hook
+- [x] 7. live run + 3 live trials
+- [x] 8. visual review and fixes
+- [x] 9. README, docs, example PDF, images; lessons; review
+
+## Review (Task 5)
+
+- **Final:**
+  - 150 unit tests, including a full scripted six-agent run.
+  - 14/14 scorers and 74/74 red-team cases.
+  - Three live trials on the final code passed **14/14 in 3 of 3** ($1.16–1.20, 293–314 s each), after one scorer fix.
+  - The notebook cross-check matches all 89 strategies (largest difference 8e-16).
+  - The example deck has 24 pages, from run `20261029-082045-eval1`.
+- **Result (2016-05-02 to 2026-10-28, in-sample, no costs):**
+  - The final 5 are all Top 1 strategies: four short-lookback 20-day-SMA or close variants, plus the slow 200-day SMA over 180 days.
+  - Total returns run 611.9–836.4%, against 342.8% for SPY and 638.3% for QQQ.
+  - Volatility is about 27% and drawdowns run −34% to −42%. Sharpe of 0.75–0.84 is roughly SPY's (0.76) and below QQQ's (0.86).
+  - Round 2 added Top 1 / 20d SMA / 20d (836.4%), which replaced Top 3 mix / 20d SMA / 15d, the best Sharpe at 1.01.
+  - An 80/20 SPY blend historically beat SPY alone on return, volatility and drawdown.
+- **Defects found (visual review after a 14/14 run):**
+  - a one-sided diversification section → a balance rule, shown to fail on the old deck;
+  - misattributed figures → an attribution prompt rule;
+  - a legend covering the drawdowns;
+  - an 8-point decision log, now split over 2 pages;
+  - a cost-note wording error;
+  - inconsistent "Top 3" labels.
+
+  Separately, a live trial failed on a scorer/source text mismatch; the scorer was fixed.
+- **Follow-ups (user requests, 2026-10-29):**
+  - Correlation with SPY is added to the scores, every agent view, and both analysis tables (Table 1 has a full 84-strategy correlation grid).
+  - The PDF highlights correlation phrases in the commentary. The executive summary and diversification sections must cite correlation; the new rule was shown to fail on the previous deck.
+  - New PM pages "Constructive Feedback" and "Harsh Feedback" are topic-checked in code, number-checked and labelled simulated.
+  - 156 tests pass. The live run `20261029-092959-eval1` passed 14/14 and is the new example deck (26 pages).
+- **Open:** the Claude Code guard flags punctuation-only "/" tokens as paths (a false positive). The fix was written, but editing the guard was denied as self-modification, so it awaits the user.
+
+---
+
 # Task 4: Momentum v3, always fully invested (no cash, ever)
 
 Plan: `C:\Users\emitb\.claude\plans\piped-imagining-popcorn.md`. User: "don't send allocations to zero for any reason". Both cash rules are removed. 50/30/20 in the top three every month.

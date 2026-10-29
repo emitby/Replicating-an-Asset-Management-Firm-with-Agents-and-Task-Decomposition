@@ -1,194 +1,59 @@
 # Agentic workflows: how the firm is replicated
 
-This document explains how the project turns an asset manager's workflow into cooperating agents: the task decomposition, how each agent works, how work moves between them, and how reliability was built up and measured. Every figure here comes from real run traces in this repo's `runs/` directories. Those folders are gitignored, but the trace format is documented in [harness.md](harness.md).
+An asset manager's research process becomes a sequence of agents, each with one job, a narrow toolset, and a checked hand-off. The core of this version is a **two-round loop between a Research Agent and a Portfolio Manager Agent**, like an analyst and a PM iterating on ideas.
 
----
+## Task decomposition
 
-## 1. Task decomposition
-
-A real firm takes an idea from data to a client-ready pitch through specialized teams. Each team has a narrow job, clear inputs and outputs, and someone checking its work. The same structure carries over to agents:
-
-```mermaid
-flowchart TB
-    subgraph firm[Asset management firm]
-      direction LR
-      DO[Data operations] --> QR[Quant research] --> PA[Performance analytics] --> IR[Investor relations]
-      IT[Investment team] --> IR
-      CO[Compliance] -.reviews.-> IR
-      OPS[Operations] -.coordinates.-> DO
-    end
-    subgraph agents[This project]
-      direction LR
-      DA[Data Agent] --> BA[Backtest Agent] --> AA[Analytics Agent] --> PR[Presentation Agent]
-      TA[Team Agent] --> PR
-      GR[Guardrails: code] -.verify.-> PR
-      H[Harness: code] -.orchestrates.-> DA
-    end
-```
-
-| Firm function | Agent / component | Task | Inputs → outputs |
+| Firm function | Agent | Hand-off artifact | Checked by |
 |---|---|---|---|
-| Data operations | **Data Agent** | Source and certify prices for 6 ETFs and the T-bill rate | Ticker list, start date → `prices.csv`, `data_report.json` |
-| Quant research | **Backtest Agent** | Test 4 MA rules plus walk-forward selection, and 5 momentum lookbacks (50/30/20 in the top three) | Prices → `backtest.json`, `momentum.json`, `returns.csv` |
-| Performance analytics | **Analytics Agent** | Metrics for 3M/1Y/3Y/5Y/inception, a head-to-head since 2011, and findings | Returns → `analytics.json` |
-| Investor relations | **Presentation Agent** | Narrative, chart choice and slide order, the pitch PDF | Analytics, team → `presentation.pdf` |
-| Investment team | **Team Agent** | A fictional PM and 5 analysts with credentials | Strategy description → `team.json` |
-| Compliance | **Guardrails** (code) | Numbers, language, disclosures, balance, personas | Every agent-written string |
-| Operations | **Harness** (code) | Sequencing, hand-off validation, tracing, cost | All of the above |
+| Market data | Data Agent | `prices.csv`, `data_report.json` | `validate_data` |
+| Quant research (round 1) | Research Agent | `research.json` (84 scored strategies, findings) | `validate_research(1)` |
+| Portfolio management (round 1) | Portfolio Manager Agent | `pm.json` (top 5, 5 proposals) | `validate_pm(1)` |
+| Quant research (round 2) | Research Agent | `research.json` (+5 strategies, findings) | `validate_research(2)` |
+| Portfolio management (round 2) | Portfolio Manager Agent | `pm.json` (final 5, decisions, meeting) | `validate_pm(2)` |
+| Risk and performance analytics | Analytics Agent | `analytics.json` | `validate_analytics` |
+| Investor relations | Presentation Agent | `deck.json` → `presentation.pdf` | `validate_presentation` |
+| (Branding) | Team Agent | `team.json` | `validate_team` |
 
-**Design rules behind the decomposition**
+## The back-and-forth, in one real run
 
-1. **One agent per function, with a narrow toolset.** An agent's tools are its job description. The Backtest Agent can't write slides, and the Presentation Agent can't change data.
-2. **Hand-offs are files, not conversations.** Each agent starts fresh with a short task and reads the previous stage's artifacts through its tools. No agent's context fills up with another agent's work, and any stage can be re-run alone (`run.ps1 stage presentation --from runs/<id>`).
-3. **Agents decide, code computes.** Every number, chart, table and disclosure is produced by deterministic, unit-tested Python. Agents choose what to run and explain what it means.
-4. **Compliance and operations are code, not agents.** Rules that must hold every time are enforced deterministically. They don't depend on an LLM remembering them.
-5. **Independent work runs in parallel.** The Team Agent needs no market data, so it runs alongside Data → Backtest → Analytics.
+From run `20261029-082045-eval1`:
 
----
+1. **Research → PM.** After running all 84 strategies, the Research Agent reported:
+   - the Top 1 rule with a 20-day SMA and a 15-day lookback led, at 834.9%;
+   - the Top 3 mix with the same signal had the best risk profile (Sharpe 1.01, max drawdown −27.5%);
+   - the long/short family failed;
+   - results were sensitive to the lookback.
+2. **PM → Research.** The PM selected the top 5 by total return; code confirmed the set. For each pick it wrote a rationale, a pro and a con. It then proposed 5 parameter sets to probe the edges of what worked: a 20-day lookback between the two best, 10- and 30-day SMAs, a 20-day Top 3 mix, and a 180-day SMA next to the 200-day winner.
+3. **Research → PM.** Only the 20-day lookback held up, at 836.4%. Moving the SMA to 10 or 30 days roughly halved the return.
+4. **PM's final call.**
+   - Code applied the rule: Top 1 / 20d SMA / 20d replaced Top 3 mix / 20d SMA / 15d.
+   - The PM explained each decision, including the cost of the change: the removed strategy had the best Sharpe.
+   - The PM flagged the narrow peak as possible overfitting and named next steps: sub-period checks, a cost estimate, and a second look at the Top 3 mix.
 
-## 2. Anatomy of one agent
+In the three live trials the final line-ups were nearly identical. The loop converged on the 20-day-SMA region each time.
 
-Every agent is the same small loop (`strategy/agents/runtime.py`) with a different prompt and toolset:
+## Why the hand-offs are reliable
 
-```mermaid
-flowchart LR
-    T[task] --> M{Claude call}
-    M -- tool_use --> X[run tools concurrently:<br/>signature check → handler]
-    X -- result or is_error --> M
-    M -- text --> R[reply, stored in notes/stage.md]
-    M -- refusal --> S[safe reply]
-    X -. every call .-> TR[(trace.jsonl)]
-```
+- **Hand-offs are files, checked by validators.** No agent reads another agent's memory, only its saved artifacts and messages.
+- **Decisions with right answers are made in code.** The ranking and the replacement rule can't be argued with; the PM explains them.
+- **Agents can't invent numbers.** Every sentence is checked against the computed results when it is saved, and again before the PDF is built.
+- **Errors are recoverable.** A rejected call returns the reason, and the agent fixes it and resubmits. In the example run:
+  - `save_research` was rejected twice for numbers it couldn't support (for example, a leader-change count it had computed itself);
+  - `propose_strategies` was rejected once, because a 200-day SMA over 210 days couldn't trade from the window start;
+  - `finalize` was rejected once, for an uncomputed number;
+  - every rejection was corrected on the next turn.
+- **Hooks and the sandbox bound what any tool can do,** whatever the agent asks for.
 
-- **Model:** `claude-opus-5-5` with adaptive thinking, an `effort` level per agent (low for narrow tasks, medium for judgment-heavy ones), prompt caching, and server-side refusal fallbacks.
-- **Tools** are Python functions behind JSON schemas with enums. A tool can be called only with valid arguments. Wrong arguments, out-of-order calls and rule violations come back as `is_error` results with a specific message, and the agent fixes them on its next turn.
-- **Preconditions are encoded in tools.** "Run the quality check before saving." "Backtest every MA and every momentum lookback before saving." "Compute every comparison window." The agent can't skip a step, because the save tool refuses until the step is done.
-- **Limits:** a turn cap per agent, a run-wide token budget, and an append-only conversation history.
+## Rebuildable output
 
-### A real run, agent by agent
+The PDF is the last, deterministic step. Everything it needs is saved, so `build-pdf runs/<id>` re-renders it after a run without re-running the agents. For example, you can fix a slide's wording in `deck.json` or change the layout.
 
-*This trace is from momentum v1 (top-1, 4 lookbacks). Momentum v2 (50/30/20 top-three, 5 lookbacks, QQQ benchmark) runs took about 3–4 minutes and $0.65–0.80. Momentum v3 (always fully invested) runs take about 4–5 minutes and about $1: the Presentation Agent does more self-correction under the v3 honesty checks, often through `revise_slide`. Per-tool token counts for a v3 run are in [tools-and-tokens.md](tools-and-tokens.md). The agent structure and flow are identical.*
+## Cost profile
 
-Run `20261019-165936-eval3`: 183 seconds, **$0.65**, about 348K tokens. 83% of input tokens were served from the prompt cache.
+A run takes about 5 minutes and about $1.20. The Presentation and PM agents cost the most:
 
-| Agent | Model turns | Tool calls | What it did | Cost |
-|---|---|---|---|---|
-| Team | 2 | `submit_team` ×1 | Six personas, accepted first time | $0.07 |
-| Data | 4 | `fetch_prices`, `check_data_quality` ×2, `save_dataset` | Called the quality check before fetching, got "Fetch prices first", corrected itself | $0.04 |
-| Backtest | 4 | `run_ma_backtest` ×4, `run_momentum` ×4, `run_walk_forward`, `compare_candidates` ×2, `save_backtest` | Ran 9 independent tools **in one turn, concurrently**. The comparison was rejected until the walk-forward finished, then retried. | $0.04 |
-| Analytics | 3 | `compute_metrics` ×5, `compute_comparison` ×5, `rolling_analysis`, `save_analytics` | 11 calls in one turn, then findings passed the number check first time | $0.13 |
-| Presentation | 15 | `list_metrics`, `get_team`, `render_chart` ×10, `add_slide` ×18, `add_standard_page` ×5, `build_pdf` | 18 slides, all passing the guardrails as added; built a 27-page deck | $0.38 |
+- the PM re-reads its 84-row results table across turns;
+- the Presentation Agent reads all metrics and the dialogue.
 
-Stage timeline: Team and Data start together. Data finishes at 25 s, Backtest at 45 s and Analytics at 71 s, with Team already done at 27 s. Presentation finishes at 183 s.
-
-### Self-correction across all live runs
-
-Across **24 successful live runs and 1,182 tool calls**:
-
-| Agent | Rejections | Kind |
-|---|---|---|
-| Backtest | 24 | Called `compare_candidates` in parallel with `run_walk_forward`. The tool requires the walk-forward first. Recovered every time. |
-| Data | 4 | Quality check before fetch. Recovered. |
-| Presentation | 1 | A slide rejected by the number and language guardrail. Rewritten. |
-| Team | 1 | A schema rejection. Resubmitted correctly. |
-
-**Lesson:** content guardrails almost never trigger, because each prompt *describes* the rules the code *enforces*. The guardrail is the safety net, not the primary mechanism. Ordering mistakes are common and harmless, because the tools refuse cleanly and say why.
-
----
-
-## 3. Orchestration (the harness)
-
-```mermaid
-sequenceDiagram
-    participant H as Harness
-    participant T as Team
-    participant D as Data
-    participant B as Backtest
-    participant A as Analytics
-    participant P as Presentation
-    par background
-        H->>T: create team
-        T-->>H: team.json ✔ validate_team
-    and critical path
-        H->>D: prepare dataset
-        D-->>H: prices.csv ✔ validate_data (tickers, history for 24m lookback)
-        H->>B: backtest both strategies
-        B-->>H: backtest/momentum/returns ✔ validate_backtest (all MAs + all lookbacks)
-        H->>A: analyze
-        A-->>H: analytics.json ✔ validate_analytics (all windows + comparison)
-    end
-    H->>P: build the deck
-    P-->>H: presentation.pdf ✔ validate_presentation (re-check every slide)
-    H->>H: manifest.json (status, cost per agent, data hash)
-```
-
-- **Validators between stages** stop a run as soon as a hand-off is incomplete, so a later agent never builds on bad input.
-- **Every model call and tool call is traced** (`trace.jsonl`) with inputs, outcome, latency and tokens. The manifest records cost per agent.
-- **Single-stage re-runs** reuse saved artifacts, which makes it cheap to iterate on one agent's prompt.
-
----
-
-## 4. Guardrails in three layers
-
-| Layer | When | Examples |
-|---|---|---|
-| **At the tool** (the agent can fix it) | As content is created | Every number checked against computed results. Banned promissory and urgency language. Persona names off slides. Pro/Con slides that must cover each lookback's weaknesses. Executive-summary verdict. MA/60/40 balance. Team schema (real firms, famous names, certifications, experience consistent with dates). |
-| **At the hand-off** (harness) | After each stage | Artifacts exist and are complete. All slides re-checked before acceptance. |
-| **In evals** (after the fact) | On the finished run | 14 scorers re-verify everything independently. 42 red-team cases attack the guardrails. |
-
-Content that must always be right is **owned by code**, not agents:
-- the disclosure footer, which states the cost treatment of *both* strategies
-- the disclosures page
-- the IN-SAMPLE labels
-- all tables
-- the "AI-generated, fictional" stamp on every persona card and team page title
-
-A design principle that came out of this project: **every figure an agent can see is printed in a code-generated table.** This is *traceability by construction*, enforced by a unit test. Any number a reader finds on a slide, they can also find in a table.
-
----
-
-## 5. The build process as a workflow
-
-The project itself was built by an agent (Claude Code) under [CLAUDE.md](../CLAUDE.md): plan mode first, subagents for independent review, verification before calling anything done, and a lessons log. Generated output was improved in a repeating loop:
-
-```mermaid
-flowchart LR
-    B[build / fix] --> U[unit tests] --> L[live run] --> E[14 scorers + red-team]
-    E --> V[subagent visual review]
-    V -- new defect class --> G[add guardrail at source + scorer]
-    G --> C[confirm scorer FAILS on the old artifact]
-    C --> B
-    E --> T[3 live trials → pass rates]
-```
-
-What each step caught (details in [evals.md](evals.md)):
-
-| Caught by | Examples |
-|---|---|
-| Unit tests | Momentum's initial-purchase cost never charged (a pandas NaN-sum quirk) |
-| Live runs | Intraday price used as a close. Windows `\\?\` path breaking confinement under concurrency. |
-| Scorer debugging | **A page title silently dropped by the PDF library.** A heuristic in a scorer. |
-| Independent cross-check | Nothing: momentum matched a standalone implementation exactly over 190 months |
-| Visual reviews (4 rounds) | Personas named as contacts. An urgency title. **A false "net of costs" footer on momentum pages.** 60/40 beating the MA strategy never mentioned. A wrong range. A near-tie claimed as a pro. Unreadable heatmap colors. |
-| Live trials (5 rounds) | Intermittent untraceable figures. A bio phrase flagged at eval time but not at submit time. |
-
-**Takeaways for building agentic workflows**
-
-1. **A passing eval suite is necessary but not sufficient.** All automated checks passed several times while the rendered deck still had real problems. Keep a semantic review (human or subagent) in the loop.
-2. **Turn each new defect class into a guardrail at the source *and* a scorer, and prove the scorer fails on the bad artifact** before trusting it.
-3. **Measure pass rates over several live trials.** Agents aren't deterministic, and one green run proves little.
-4. **Prefer guarantees by construction over after-the-fact checks**, as with traceability.
-5. **Check at the smallest unit that carries the claim.** A keyword match across a whole slide "acknowledged" a fact the slide never stated. Checking within a single bullet fixed that.
-6. **Code-owned boilerplate must be re-read whenever the scope changes.** A footer that was true for one strategy became false when a second was added.
-
----
-
-## 6. Cost and performance profile
-
-| | Value |
-|---|---|
-| Live run, both strategies (momentum v3) | About 260 s, **about $1.02** (earlier versions: 100–195 s, $0.31–0.80) |
-| Biggest consumer | Presentation Agent, about 63% of cost in v3 (14 turns). See [tools-and-tokens.md](tools-and-tokens.md). |
-| Prompt caching | Only 64 of about 440K input tokens were uncached in the v3 profile run; the rest were cache writes and reads |
-| Live eval, 3 trials | About 12 minutes, about $2.60 (v3) |
-| Unit tests, red-team, independent cross-check | Free, no API calls |
+Per-tool costs are in [tools-and-tokens.md](tools-and-tokens.md).

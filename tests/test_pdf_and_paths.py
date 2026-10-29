@@ -1,18 +1,112 @@
+"""PDF structure, rebuild-from-artifacts, governance consistency, and filesystem guardrails."""
+
+import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
 from pypdf import PdfReader
 
-from fixtures import VALID_TEAM
-from strategy import charts
-from strategy.analytics import calendar_year_returns, compute_window, growth_of, rolling_summary
-from strategy.backtest import candidate_table, daily_rf
-from strategy.config import WINDOWS
+from strategy import charts, governance
+from strategy.hooks import HOOK_DESCRIPTIONS, default_hooks
 from strategy.paths import PROJECT_DIR, ConfinementError, confine
-from strategy.pdf import PERF_FOOTER, Deck
-from strategy.team import FICTIONAL_LABEL, validate_team
+from strategy.pdf import TABLE_PAGE_PREFIX, TITLE, build_from_run, pct
+from strategy.team import FICTIONAL_LABEL
 
+
+def pages(path):
+    return [re.sub(r"\s+", " ", p.extract_text() or "") for p in PdfReader(str(path)).pages]
+
+
+# ------------------------------------------------------------------ the deck
+
+def test_deck_structure(offline_run):
+    text = pages(offline_run.path("presentation.pdf"))
+    assert PdfReader(str(offline_run.path("presentation.pdf"))).metadata.title == TITLE
+    assert TITLE in text[0] and "How AI agents produced this presentation" in text[0] and "back-and-forth" in text[0]
+    assert "The Agentic Workflow" in text[1]
+    assert "The Harness" in text[2] and "Guardrails and Evals" in text[3]
+    tables = [p for p in text if p.lstrip().startswith(TABLE_PAGE_PREFIX)]
+    assert len(tables) == 2                                                          # user requirement
+    assert "Correlation with SPY" in tables[0] and "Corr. SPY" in tables[1]       # user requirement
+    assert sum("simulated conversation" in p for p in text) == 1
+    meeting = next(i for i, p in enumerate(text) if "simulated conversation" in p)
+    assert text[meeting + 1].lstrip().startswith("Constructive Feedback")             # user request
+    assert text[meeting + 2].lstrip().startswith("Harsh Feedback")                    # user request
+    assert sum("Decision Log, Round 1" in p for p in text) == 2 and sum("Decision Log, Round 2" in p for p in text) == 1
+    assert sum(p.count(FICTIONAL_LABEL) for p in text) >= 6
+    assert "Important Disclosures" in text[-1] and "exclude trading costs" in text[-1]
+
+
+def test_harness_page_shows_this_runs_cost(offline_run):
+    """The harness re-renders the PDF after writing the manifest, so the cost table is filled in."""
+    harness_page = pages(offline_run.path("presentation.pdf"))[2]
+    m = json.loads(offline_run.path("manifest.json").read_text(encoding="utf-8"))
+    assert f"${m['cost_usd']:.2f}" in harness_page and "Research Agent" in harness_page
+
+
+def test_pdf_rebuilds_from_saved_artifacts_after_editing(offline_run, workdir):
+    """User requirement: the PDF can be edited and rebuilt without re-running any agent."""
+    copy = workdir / "copy"
+    shutil.copytree(offline_run.run_dir, copy)
+    deck = json.loads((copy / "deck.json").read_text(encoding="utf-8"))
+    deck["slides"][0]["title"] = "Edited Executive Summary"
+    (copy / "deck.json").write_text(json.dumps(deck), encoding="utf-8")
+    out = build_from_run(copy, "edited.pdf")
+    assert any("Edited Executive Summary" in p for p in pages(out))
+
+
+def test_build_from_run_names_missing_artifacts(workdir):
+    with pytest.raises(FileNotFoundError, match="deck.json"):
+        build_from_run(workdir)
+
+
+@pytest.mark.parametrize("text, phrase", [
+    ("Its correlation with SPY of 0.16 is low.", "correlation with SPY of 0.16"),
+    ("The variants show 0.13 to 0.16 correlation to SPY since inception.", "0.13 to 0.16 correlation to SPY"),
+    ("Final five correlations of 0.13-0.36 vs QQQ's 0.93.", "correlations of 0.13-0.36"),
+    ("Correlation with SPY: 0.16 (QQQ: 0.93).", "Correlation with SPY: 0.16"),
+])
+def test_correlation_phrases_are_highlighted(text, phrase):
+    """User requirement: correlation is highlighted wherever the commentary explains benefits."""
+    from strategy.pdf import _highlight
+    assert f'<b><font color="#1f4e79">{phrase}</font></b>' in _highlight(text)
+
+
+def test_other_ratios_are_not_highlighted():
+    from strategy.pdf import _highlight
+    text = "Sharpe of 0.84 vs SPY's 0.76; total return 834.9%."
+    assert _highlight(text) == text
+
+
+def test_no_negative_zero_in_formatting():
+    assert pct(-0.00001) == "0.0%" and pct(0.1234) == "12.3%" and pct(None) == "n/a"
+
+
+def test_all_charts_render(offline_run, workdir):
+    from strategy.pdf import load_run
+    data = load_run(offline_run.run_dir).chart_data()
+    for kind in charts.CHART_KINDS:
+        path = charts.render(kind, workdir / "charts", data)
+        assert path.exists() and path.stat().st_size > 10_000
+
+
+# ------------------------------------------------------------------ governance text matches the code
+
+def test_governance_evals_match_the_scorers():
+    from evals.scorers import SCORERS
+    assert [s.__name__ for s in SCORERS] == list(governance.EVALS)
+
+
+def test_every_installed_hook_is_described():
+    hooks = default_hooks()
+    described = " ".join(HOOK_DESCRIPTIONS)
+    for h in [*hooks.pre, *hooks.post]:
+        assert getattr(h, "__name__") in described
+
+
+# ------------------------------------------------------------------ filesystem guardrails
 
 def test_confine_rejects_outside_paths():
     for p in (PROJECT_DIR.parent / "x.txt", PROJECT_DIR / ".." / "x.txt", Path("/x.txt")):
@@ -31,7 +125,7 @@ def test_confine_accepts_windows_extended_prefix():
 def test_no_os_import_anywhere():
     """CLAUDE.md guardrail: no `import os` in project Python files."""
     offenders = []
-    for folder in ("strategy", "evals", "tests"):
+    for folder in ("strategy", "evals", "tests", ".claude"):
         for f in (PROJECT_DIR / folder).rglob("*.py"):
             if re.search(r"^\s*(import os\b|from os\b)", f.read_text(encoding="utf-8"), re.MULTILINE):
                 offenders.append(str(f))
@@ -40,131 +134,6 @@ def test_no_os_import_anywhere():
 
 def test_matplotlib_cache_confined():
     charts.assert_cache_confined()
-
-
-def test_deck_has_disclosures_and_labels(workdir, prices, backtest_result):
-    wf, returns = backtest_result
-    analytics = {"windows": {w: compute_window(returns, w) for w in WINDOWS},
-                 "rolling_1y": rolling_summary(returns), "growth_of_10000": growth_of(returns),
-                 "calendar_years": calendar_year_returns(returns)}
-    eq = charts.render("equity_vs_spy", workdir / "charts", returns)
-    team, _ = validate_team(VALID_TEAM)
-    deck = Deck("Test Deck", "Subtitle")
-    deck.add_slide("Performance", ["Strong risk-adjusted results."], eq, performance=True)
-    deck.add_slide("How it works", ["Holds SPY or IEF."], None, performance=False)
-    deck.add_metrics_table(analytics)
-    deck.add_candidates_table(candidate_table(prices, wf, daily_rf(prices)), wf["selection_history"])
-    deck.add_team(team)
-    pdf = deck.build(workdir / "deck.pdf")
-
-    pages = [p.extract_text() for p in PdfReader(str(pdf)).pages]
-    norm = [re.sub(r"\s+", " ", t) for t in pages]
-    footer_start = PERF_FOOTER[:40]
-    assert footer_start in norm[1]                 # performance slide
-    assert footer_start not in norm[2]             # non-performance slide
-    assert footer_start in norm[3] and footer_start in norm[4]   # metrics + in-sample tables
-    assert "IN-SAMPLE" in norm[4]
-    # Regression: the metrics-table footnote was silently dropped when its frame had no room.
-    assert "Periods end on the last completed session" in norm[3] and "Current allocation" in norm[3]
-    assert sum(t.count(FICTIONAL_LABEL) for t in norm) >= 6
-    assert "Important Disclosures" in norm[-1]
-    assert len(pages) == 1 + 4 + 2 + 1             # cover, 4 pages, 2 team pages, disclosures
-
-
-def test_no_negative_zero_in_formatting():
-    """Regression: a 1-year return of -0.00004 rendered as '-0.0%'."""
-    from strategy.agents.display import show
-    from strategy.pdf import num, pct
-    assert pct(-0.00004) == "0.0%" and pct(-0.0006) == "-0.1%" and pct(0.0) == "0.0%"
-    assert num(-0.001) == "0.00" and num(-0.006) == "-0.01"
-    assert show(-0.00004, "cagr") == "0.0%" and show(-0.001, "sharpe") == "0.00" and show(1.1, "sharpe") == "1.10"
-
-
-def test_performance_footer_is_true_for_both_strategies():
-    """Regression: the footer said 'net of modeled trading costs' on momentum pages, which are gross."""
-    assert "momentum results exclude trading costs" in PERF_FOOTER
-    assert "MA strategy results are net of modeled trading costs" in PERF_FOOTER
-
-
-def test_long_titles_are_never_dropped(workdir):
-    """Regression: a two-line title didn't fit the header frame and ReportLab silently omitted it."""
-    long_title = "A Deliberately Long Slide Title That Will Certainly Wrap Onto A Second Line Of Text Here"
-    deck = Deck("T", "S")
-    deck.add_slide(long_title, ["One bullet."])
-    pages = [re.sub(r"\s+", " ", p.extract_text()) for p in PdfReader(str(deck.build(workdir / "t.pdf"))).pages]
-    assert "Deliberately Long Slide Title" in pages[1]
-
-
-def test_every_code_page_has_its_title(workdir, prices, backtest_result):
-    """Every code-generated page must render its header (traceability evals locate pages by these titles)."""
-    from strategy.analytics import comparison_extras, comparison_window
-    from strategy.config import COMPARISON_WINDOWS, MomentumConfig
-    from strategy.momentum import add_to_returns, run_all_momentum
-    from strategy.pdf import CODE_PAGE_TITLES
-    wf, returns = backtest_result
-    mom = run_all_momentum(prices, MomentumConfig())
-    returns = add_to_returns(returns, mom)
-    comp = {"windows": {w: comparison_window(returns, w, (1, 3, 6, 12, 24)) for w in COMPARISON_WINDOWS},
-            **comparison_extras(returns, (1, 3, 6, 12, 24))}
-    analytics = {"windows": {w: compute_window(returns, w) for w in WINDOWS}, "rolling_1y": rolling_summary(returns),
-                 "growth_of_10000": growth_of(returns), "calendar_years": calendar_year_returns(returns)}
-    deck = Deck("T", "S")
-    deck.add_metrics_table(analytics)
-    deck.add_candidates_table(candidate_table(prices, wf, daily_rf(prices)), wf["selection_history"])
-    deck.add_comparison_table(comp)
-    deck.add_momentum_supporting(comp, {f"MOM{L}": r["summary"] for L, r in mom.items()})
-    deck.add_supporting_data(analytics)
-    pdf = deck.build(workdir / "c.pdf")
-    text = " ".join(re.sub(r"\s+", " ", p.extract_text()) for p in PdfReader(str(pdf)).pages)
-    assert [t for t in CODE_PAGE_TITLES if t not in text] == []
-    # Regression: with 8 series the calendar table's QQQ column was drawn under the growth table.
-    assert not header_boxes_overlap(pdf, "Momentum Detail: Calendar", "Year", "Growth of $10,000 since 2011")
-
-
-def header_boxes_overlap(pdf, page_marker, left_header_text, right_header_text):
-    """True if two tables' header-row boxes (filled rectangles) overlap horizontally on the same page.
-    Comparing table boxes, not words: a word search missed the real defect (the overlap hid the column's end)."""
-    import pymupdf
-    page = next(p for p in pymupdf.open(str(pdf)) if page_marker in p.get_text())
-    fills = [d["rect"] for d in page.get_drawings() if d.get("fill")]
-
-    def header_box(text):
-        # Only matches inside a filled box are table headers (the page title can contain the same words).
-        boxes = [r for hit in page.search_for(text) for r in fills if r.contains(hit)]
-        return max(boxes, key=lambda r: r.width)
-
-    return header_box(left_header_text).x1 > header_box(right_header_text).x0 + 0.5
-
-
-def test_overlap_check_catches_known_bad_layout(workdir):
-    """The check itself must detect an overlap (two tables deliberately drawn on top of each other)."""
-    from reportlab.pdfgen import canvas as rl_canvas
-    from strategy.pdf import Deck
-    path = workdir / "bad.pdf"
-    c = rl_canvas.Canvas(str(path))
-    c.drawString(40, 800, "Momentum Detail: Calendar")
-    Deck._small_table([["Year", "A", "B", "C", "D"], ["2020", "1", "2", "3", "4"]], [90] * 5).wrapOn(c, 600, 800)
-    t1 = Deck._small_table([["Year", "A", "B", "C", "D"], ["2020", "1", "2", "3", "4"]], [90] * 5)
-    t1.wrapOn(c, 600, 800)
-    t1.drawOn(c, 40, 700)
-    t2 = Deck._small_table([["Growth of $10,000 since 2011", "Value"]], [180, 60])
-    t2.wrapOn(c, 600, 800)
-    t2.drawOn(c, 300, 700)                       # starts inside t1 (t1 spans 40..490)
-    c.save()
-    assert header_boxes_overlap(path, "Momentum Detail: Calendar", "Year", "Growth of $10,000 since 2011")
-
-
-def test_all_charts_render(workdir, prices, backtest_result):
-    from strategy.analytics import comparison_window
-    from strategy.config import COMPARISON_WINDOWS, MomentumConfig
-    from strategy.momentum import add_to_returns, run_all_momentum
-    wf, returns = backtest_result
-    returns = add_to_returns(returns, run_all_momentum(prices, MomentumConfig()))
-    analytics = {"windows": {w: compute_window(returns, w) for w in WINDOWS},
-                 "comparison": {"windows": {w: comparison_window(returns, w, (1, 3, 6, 12, 24)) for w in COMPARISON_WINDOWS}}}
-    for kind in charts.CHART_KINDS:
-        path = charts.render(kind, workdir / "charts", returns, analytics=analytics, history=wf["selection_history"])
-        assert path.exists() and path.stat().st_size > 10_000
 
 
 def test_latest_run_is_none_on_a_fresh_clone(monkeypatch):

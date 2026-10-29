@@ -25,6 +25,10 @@ BANNED_PATTERNS = [
     r"\blimited time\b",
     # overclaiming certainty about a rules-based selection
     r"\balways (picks|wins|beats|outperforms|chooses the (winner|best))\b", r"\bnever (misses|underperforms)\b",
+    # marketing overclaims about diversification (the deck has a positive portfolio-fit section)
+    r"\beliminat\w* (all |the )?(risk|losses|drawdowns)\b",
+    r"\b(protects?|shields?|insulates?) (you |investors |portfolios? )?(from|against) (all )?"
+    r"(losses|drawdowns|downturns|crashes)\b",
 ]
 
 

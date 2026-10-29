@@ -23,14 +23,19 @@ from pathlib import Path
 
 import anthropic
 
-from strategy.agents import analytics_agent, backtest_agent, data_agent, presentation_agent, team_agent
+from strategy.agents import analytics_agent, data_agent, pm_agent, presentation_agent, research_agent, team_agent
 from strategy.agents.runtime import MODEL, Trace
 from strategy.config import PipelineConfig
 from strategy.context import RunContext
 from strategy.paths import confine, write_json, write_text
 
-AGENTS = {"Data Agent": data_agent, "Backtest Agent": backtest_agent, "Analytics Agent": analytics_agent,
-          "Team Agent": team_agent, "Presentation Agent": presentation_agent}
+# Agent name -> builders. The Research and Portfolio Manager Agents have a different tool set in each round;
+# their definitions are profiled over the union of both rounds' tools.
+AGENTS = {"Data Agent": [data_agent.build],
+          "Research Agent": [lambda ctx: research_agent.build(ctx, 1), lambda ctx: research_agent.build(ctx, 2)],
+          "Portfolio Manager Agent": [lambda ctx: pm_agent.build(ctx, 1), lambda ctx: pm_agent.build(ctx, 2)],
+          "Analytics Agent": [analytics_agent.build], "Team Agent": [team_agent.build],
+          "Presentation Agent": [presentation_agent.build]}
 PROBE = [{"role": "user", "content": "x"}]
 
 
@@ -41,9 +46,10 @@ def count(client, **kw):
 def definition_profile(client, ctx):
     out = {}
     base = count(client)
-    for name, module in AGENTS.items():
-        agent = module.build(ctx)
-        params = agent.tool_params
+    for name, builders in AGENTS.items():
+        agents = [b(ctx) for b in builders]
+        agent = agents[0]
+        params = list({t["name"]: t for a in agents for t in a.tool_params}.values())
         system = count(client, system=agent.system) - base
         all_tools = count(client, tools=params)
         marginals = {}
@@ -95,18 +101,19 @@ def main(argv=None):
             toks = [c["tokens"] for c in calls]
             report["tools"].append({
                 "agent": agent, "tool": tool, "definition_tokens": def_tokens, "calls": len(calls),
+                "cost_usd_run": (manifest.get("cost_by_tool") or {}).get(tool, {}).get("cost_usd", 0.0),
                 "errors": sum(1 for c in calls if not c["ok"]),
                 "result_tokens_mean": round(statistics.mean(toks)) if toks else 0,
                 "result_tokens_max": max(toks) if toks else 0, "result_tokens_total": sum(toks)})
     write_json(run_dir / "token_profile.json", report)
 
     lines = [f"Run `{run_dir.name}` · model `{MODEL}` · exact counts from the token-counting endpoint", "",
-             "| Agent | Tool | Definition tokens | Calls | Result tokens (mean) | Result tokens (max) | Result tokens (total) |",
-             "|---|---|---|---|---|---|---|"]
+             "| Agent | Tool | Definition tokens | Calls | Result tokens (mean) | Result tokens (max) | Result tokens (total) | Cost (run) |",
+             "|---|---|---|---|---|---|---|---|"]
     for t in report["tools"]:
         lines.append(f"| {t['agent']} | `{t['tool']}` | {t['definition_tokens']} | {t['calls']}"
                      f"{' (' + str(t['errors']) + ' err)' if t['errors'] else ''} | {t['result_tokens_mean']:,} | "
-                     f"{t['result_tokens_max']:,} | {t['result_tokens_total']:,} |")
+                     f"{t['result_tokens_max']:,} | {t['result_tokens_total']:,} | ${t['cost_usd_run']:.3f} |")
     lines += ["", "| Agent | Effort | System prompt tokens | All tool definitions | Tool-use overhead | Model turns | "
               "Input (uncached) | Cache write | Cache read | Output | Cost |", "|---|---|---|---|---|---|---|---|---|---|---|"]
     for agent, d in defs.items():
