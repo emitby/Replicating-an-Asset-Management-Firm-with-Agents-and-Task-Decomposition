@@ -77,7 +77,7 @@ GUARD_CASES = [
     ("Bash find -delete", "Bash", {"command": "find . -name '*.tmp' -delete"}, True),
     ("Bash outside path", "Bash", {"command": "cat /c/Users/someone/secrets.txt"}, True),
     ("Bash parent traversal", "Bash", {"command": "ls ../"}, True),
-    ("Read outside", "Read", {"file_path": "C:/Windows/win.ini"}, True),
+    ("Read outside", "Read", {"file_path": str(PROJECT_DIR.parent / "win.ini")}, True),   # absolute on any OS
     ("Write outside", "Write", {"file_path": str(PROJECT_DIR.parent / "x.txt")}, True),
     ("Bash inside, grep for rm", "Bash", {"command": "grep -n \"rm\" strategy/hooks.py > /dev/null"}, False),
     ("Read inside", "Read", {"file_path": str(PROJECT_DIR / "README.md")}, False),

@@ -27,6 +27,7 @@ Claude Code hook in ``.claude/hooks/guard.py`` guards developer sessions.
 import re
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from strategy.paths import ConfinementError, confine
@@ -116,6 +117,8 @@ def confine_paths(agent, tool, tool_input):
         denial = f"Path {path[:80]!r} is outside the project directory. Access is forbidden."
         if path.startswith("~"):
             return denial  # a home directory is never inside the project
+        if re.match(r"^[A-Za-z]:[\\/]", path) and not Path(path).is_absolute():
+            return denial  # a Windows drive path on another OS: it would otherwise resolve as a relative name
         try:
             confine(path)
         except (ConfinementError, OSError, ValueError):

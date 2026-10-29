@@ -120,9 +120,9 @@ def _guard():
     ("Bash", {"command": "git rm README.md"}, True),
     ("Bash", {"command": "cat /c/Windows/win.ini"}, True),
     ("Bash", {"command": "cp README.md ../copy.md"}, True),
-    ("Read", {"file_path": "C:/Windows/win.ini"}, True),
+    ("Read", {"file_path": str(PROJECT_DIR.parent / "win.ini")}, True),      # absolute on any OS (CI runs Linux)
     ("Edit", {"file_path": str(PROJECT_DIR.parent / "x.py")}, True),
-    ("Grep", {"pattern": "x", "path": "C:/Users"}, True),
+    ("Grep", {"pattern": "x", "path": str(PROJECT_DIR.parent)}, True),
     ("Bash", {"command": "grep -n rm strategy/hooks.py"}, False),
     ("Bash", {"command": "python -m pytest -q > /dev/null"}, False),
     ("Read", {"file_path": str(PROJECT_DIR / "README.md")}, False),
