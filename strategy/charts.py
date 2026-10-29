@@ -95,6 +95,41 @@ def _save(fig, out_dir, kind):
     return path
 
 
+def render_tool_costs(out_dir, cost_by_tool, top=10):
+    """Horizontal bars of the run's cost per tool (or context owner), from manifest["cost_by_tool"].
+
+    Args:
+        out_dir: folder for the PNG (inside the project).
+        cost_by_tool: owner -> {"input_tokens", "output_tokens", "cost_usd"}.
+        top: how many owners to show; the rest are summed into one "all other tools" bar.
+
+    Returns:
+        The PNG path (``tool_costs.png``).
+    """
+    assert_cache_confined()
+    rows = sorted(cost_by_tool.items(), key=lambda kv: -kv[1]["cost_usd"])
+    shown = [(name, r["cost_usd"]) for name, r in rows[:top]]
+    rest = sum(r["cost_usd"] for _, r in rows[top:])
+    if rest > 0:
+        shown.append((f"all other tools ({len(rows) - top})", rest))
+    fig, ax = plt.subplots(figsize=(6.2, 6.2))
+    y = np.arange(len(shown))[::-1]
+    # Context owners (system prompts, the task, agent prose) in grey; tools in navy.
+    colors = ["#9e9e9e" if name.startswith("(") or name.startswith("all other") else FINAL_COLORS[0]
+              for name, _ in shown]
+    ax.barh(y, [v for _, v in shown], color=colors)
+    ax.set_yticks(y, [name for name, _ in shown], fontsize=8.5)
+    for yi, (_, v) in zip(y, shown):
+        ax.text(v, yi, f"  ${v:.3f}", va="center", fontsize=8, color="#444444")
+    ax.xaxis.set_major_formatter(mtick.StrMethodFormatter("${x:.2f}"))
+    ax.set_xlim(0, max(v for _, v in shown) * 1.25)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="x", alpha=0.25)
+    ax.set_title("Cost per tool this run (grey: prompts and agent text)", loc="left", fontsize=11,
+                 fontweight="bold", color="#222222")
+    return _save(fig, out_dir, "tool_costs")
+
+
 def render(kind, out_dir, data):
     """Render one chart.
 

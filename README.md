@@ -18,7 +18,7 @@
   <img src="docs/example/pages/page-08.png" width="49%" alt="Harsh Feedback: the PM agent attacks the analyst agents' process">
 </p>
 
-**→ [Example PDF: Agentic Capital Management Strategy Presentation](docs/example/presentation.pdf)** (26 pages) · **[Pitchbook](docs/example/pitchbook.pdf)** (10 pages + appendix) · **[Results](docs/results.md)** · **[How the agents work together](docs/agentic-workflows.md)** · **[Evals](docs/evals.md)** · **[Hooks and guardrails](docs/guardrails.md)**
+**→ [Example PDF: Agentic Capital Management Strategy Presentation](docs/example/presentation.pdf)** (26 pages) · **[Pitchbook](docs/example/pitchbook.pdf)** (12 pages + appendix) · **[Results](docs/results.md)** · **[How the agents work together](docs/agentic-workflows.md)** · **[Evals](docs/evals.md)** · **[Hooks and guardrails](docs/guardrails.md)**
 
 ## Results
 
@@ -126,7 +126,7 @@ Exact page numbers vary slightly by run, because the Presentation Agent chooses 
 
 ## The Pitchbook
 
-Every run also produces `pitchbook.pdf`: a 10-page pitch followed by an appendix holding every other page of the presentation. Code builds it from the run's saved files, so `build-pitchbook` can rebuild it at any time.
+Every run also produces `pitchbook.pdf`: a 12-page pitch followed by an appendix holding every other page of the presentation. Code builds it from the run's saved files, so `build-pitchbook` can rebuild it at any time.
 
 | Page | Content |
 |---|---|
@@ -137,10 +137,12 @@ Every run also produces `pitchbook.pdf`: a 10-page pitch followed by an appendix
 | 5 | **Investment Process**: the agentic workflow flowchart |
 | 6 | **Investment Process**: the Portfolio Manager ↔ analyst dialogue from the run |
 | 7–8 | **Constructive Feedback** and **Harsh Feedback** |
-| 9 | **Compliance**: "FAKEGIPS compliant" and "FAKECFA Code of Ethics" bullets, with a footnote that both are invented and that the firm claims no real GIPS compliance or CFA Institute affiliation |
-| 10 | **Disclosures**: this is all fake, all of it is agentic, zero risk management is applied, past results are no guarantee of future performance |
-| 11 | Appendix contents |
-| 12+ | Appendix A: strategy and research. B: risk and portfolio fit. C: process and governance. D: investment team. E: full disclosures. |
+| 9 | **Token Counts and Costs per Tool**: cost-per-tool chart, each tool's calls, input and output tokens and cost, and cost per agent, all adding up to the run's total |
+| 10 | **Evals, Hooks, Harness and Guardrails**: one page, four panels, plus this run's activity (tool calls, hook denials, rejected and corrected calls, stages validated) |
+| 11 | **Compliance**: "FAKEGIPS compliant" and "FAKECFA Code of Ethics" bullets, with a footnote that both are invented and that the firm claims no real GIPS compliance or CFA Institute affiliation |
+| 12 | **Disclosures**: this is all fake, all of it is agentic, zero risk management is applied, past results are no guarantee of future performance |
+| 13 | Appendix contents |
+| 14+ | Appendix A: strategy and research. B: risk and portfolio fit. C: process and governance. D: investment team. E: full disclosures. |
 
 <p align="center">
   <img src="docs/example/pitchbook-pages/page-02.png" width="49%" alt="Pitchbook: the top strategy and why it makes sense">

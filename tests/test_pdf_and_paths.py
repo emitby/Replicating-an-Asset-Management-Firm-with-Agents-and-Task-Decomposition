@@ -65,7 +65,9 @@ def test_pitchbook(offline_run):
     assert score.passed, score.details
     text = pages(offline_run.path("pitchbook.pdf"))
     contents = next(i for i, p in enumerate(text) if p.lstrip().startswith("Appendix Section"))
-    assert contents <= 11                                       # the main section is short
+    assert contents <= 13                                       # the main section is short
+    assert any(p.lstrip().startswith("Token Counts and Costs per Tool") for p in text[:contents])   # user request
+    assert any(p.lstrip().startswith("Evals, Hooks, Harness and Guardrails") for p in text[:contents])
     assert all("APPENDIX" in p for p in text[contents + 1:])    # every appendix page carries its section tag
     assert "does not claim compliance with the Global Investment Performance Standards" in " ".join(text)
 

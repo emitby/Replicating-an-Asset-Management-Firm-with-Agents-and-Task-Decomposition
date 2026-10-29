@@ -15,8 +15,10 @@ Main section (in order):
  5. Investment Process: the agentic workflow flowchart.
  6. Investment Process: the Portfolio Manager <-> analyst dialogue.
  7. Constructive Feedback and 8. Harsh Feedback (the PM's simulated reviews).
- 9. Compliance (with clearly fictional "FAKEGIPS" and "FAKECFA" labels).
-10. Disclosures: all fake, all agentic, no risk management, no guarantee.
+ 9. Token counts and costs per tool (and per agent), from the run's manifest.
+10. Evals, hooks, harness and guardrails on one page, with this run's activity.
+11. Compliance (with clearly fictional "FAKEGIPS" and "FAKECFA" labels).
+12. Disclosures: all fake, all agentic, no risk management, no guarantee.
 
 Appendix: every presentation page not used above, grouped into lettered
 sections (strategy and research, risk and portfolio fit, process and
@@ -28,7 +30,8 @@ results; agent-written text appears only where the presentation already
 showed it (slides, dialogue, feedback), unchanged.
 """
 
-from strategy.charts import render
+from strategy import governance
+from strategy.charts import render, render_tool_costs
 from strategy.pdf import (FEEDBACK_PAGES, GREY, NAVY, ORANGE, PAGE_H, PAGE_W, SPEAKER_COLORS, Deck, _highlight, _p,
                           _safe, inch, load_run, num, pct)
 from reportlab.lib import colors
@@ -104,6 +107,8 @@ def build_pitchbook_from_run(run_dir, out_name="pitchbook.pdf"):
     data = art.chart_data()
     kinds = sorted({*art.deck.get("charts", []), "pitch_performance"})
     charts = {kind: render(kind, art.run_dir / "charts", data) for kind in kinds}
+    if art.manifest.get("cost_by_tool"):
+        charts["tool_costs"] = render_tool_costs(art.run_dir / "charts", art.manifest["cost_by_tool"])
     return Pitchbook(art, charts).build(art.run_dir / out_name)
 
 
@@ -120,7 +125,7 @@ class Pitchbook(Deck):
         feedback = [("feedback", {"kind": k}) for k in FEEDBACK_PAGES if k in self.art.pm.get("feedback", {})]
         return [("pitch_cover", {}), ("pitch_summary", {}), ("pitch_performance", {}), ("pitch_team", {}),
                 ("flowchart", {"title": "Investment Process"}), ("pitch_dialogue", {}), *feedback,
-                ("pitch_compliance", {}), ("pitch_disclosures", {})]
+                ("pitch_costs", {}), ("pitch_governance", {}), ("pitch_compliance", {}), ("pitch_disclosures", {})]
 
     def appendix(self):
         """Every presentation page the main section doesn't use, grouped by section letter.
@@ -318,6 +323,89 @@ class Pitchbook(Deck):
             flow.append(_p(f'<font color="{color}"><b>{_safe(msg["from"])} to {_safe(msg["to"])}</b></font> '
                            f'<font color="#595959">({stage})</font>: {_highlight(_safe(msg["text"]))}', "speaker"))
         self._flow(c, 0.6 * inch, 0.8 * inch, PAGE_W - 1.2 * inch, PAGE_H - 2.1 * inch, flow)
+
+    def _draw_pitch_costs(self, c):
+        """Token counts and costs per tool and per agent, from the run's manifest (attribution sums to the total)."""
+        self._header(c, "Token Counts and Costs per Tool")
+        m = self.art.manifest
+        if not m.get("cost_by_tool"):
+            self._flow(c, 0.6 * inch, 0.8 * inch, PAGE_W - 1.2 * inch, PAGE_H - 2.1 * inch, [_p(
+                "Costs are recorded in the run's manifest when the run finishes; rebuild the pitchbook after the run "
+                "(build-pitchbook) to fill in this page.", "body_big")])
+            return
+        top, bottom = PAGE_H - 1.25 * inch, 0.8 * inch
+        chart_w = 4.4 * inch
+        c.drawImage(str(self.charts["tool_costs"]), 0.6 * inch, bottom, width=chart_w, height=top - bottom,
+                    preserveAspectRatio=True, anchor="c")
+        calls = {}
+        for per_agent in m.get("tool_calls", {}).values():
+            for tool, n in per_agent.items():
+                calls[tool] = calls.get(tool, 0) + n["calls"]
+        owners = list(m["cost_by_tool"].items())          # most expensive first
+        shown, rest = owners[:10], owners[10:]           # same split as the chart (render_tool_costs, top=10)
+        data = [["Tool or context", "Calls", "Input tokens", "Output tokens", "Cost"]]
+        data += [[o, str(calls.get(o, "")), f"{r['input_tokens']:,}", f"{r['output_tokens']:,}", f"${r['cost_usd']:.3f}"]
+                 for o, r in shown]
+        if rest:
+            data.append([f"{len(rest)} other tools", str(sum(calls.get(o, 0) for o, _ in rest)),
+                         f"{sum(r['input_tokens'] for _, r in rest):,}", f"{sum(r['output_tokens'] for _, r in rest):,}",
+                         f"${sum(r['cost_usd'] for _, r in rest):.3f}"])
+        tokens = m["usage_tokens"]
+        data.append(["Total", str(sum(calls.values())), f"{tokens['input'] + tokens['cache_write'] + tokens['cache_read']:,}",
+                     f"{tokens['output']:,}", f"${m['cost_usd']:.3f}"])
+        x = 0.6 * inch + chart_w + 0.2 * inch
+        width = PAGE_W - 0.6 * inch - x
+        t1 = self._table(data, [1.95 * inch] + [(width - 1.95 * inch) / 4] * 4, font=7.6, pad=1.6,
+                         bold_rows=(len(data) - 1,))
+        agents = sorted(m["cost_by_agent_usd"].items(), key=lambda kv: -kv[1])
+        data2 = [["Agent", "Model input", "Output", "Cost"]] + [
+            [a, f"{sum(v for k, v in m['tokens_by_agent'][a].items() if k != 'output'):,}",
+             f"{m['tokens_by_agent'][a]['output']:,}", f"${cost:.3f}"] for a, cost in agents]
+        t2 = self._table(data2, [1.95 * inch] + [(width - 1.95 * inch) / 3] * 3, font=7.6, pad=1.6)
+        y = top
+        for t in (t1, t2):
+            tw, th = t.wrapOn(c, width, PAGE_H)
+            t.drawOn(c, x, y - th)
+            y -= th + 0.18 * inch
+        self._flow(c, x, bottom, width, max(y - bottom, 0.3 * inch), [_p(
+            f"This run: {sum(tokens.values()):,} tokens, ${m['cost_usd']:.2f}, {m.get('seconds', 0):.0f} seconds, model "
+            f"{_safe(m.get('model', ''))}. Each model call's input tokens are attributed to the content it re-read (a tool "
+            "owns its requests and results) and its output tokens to the blocks it wrote, priced at that call's rates, "
+            "so the rows add up exactly to the total. Input includes cache reads (billed at 1/20 of the input price) "
+            "and cache writes (1.25x).",
+            "small")])
+
+    def _draw_pitch_governance(self, c):
+        """Evals, hooks, harness and guardrails on one page (full versions in Appendix C), with this run's activity."""
+        self._header(c, "Evals, Hooks, Harness and Guardrails")
+        m = self.art.manifest
+        calls = sum(n["calls"] for per in m.get("tool_calls", {}).values() for n in per.values())
+        errors = sum(n["errors"] for per in m.get("tool_calls", {}).values() for n in per.values())
+        denials = len((m.get("hooks") or {}).get("denials", []))
+        from strategy.cli import STAGE_NAMES      # the harness's stages (cli keeps the list import-light)
+        stages = len(STAGE_NAMES)
+        strip = (f"This run: {calls} tool calls through the hooks, {denials} hook denials, {errors} tool calls rejected "
+                 f"and corrected by the agents, {stages} stages validated." if m.get("tool_calls") else
+                 "Run activity is recorded in the manifest when the run finishes.")
+        evals = ", ".join(governance.EVALS)
+        panels = [
+            ("Harness", [f"&bull; {_safe(t)}" for t in governance.HARNESS]),
+            ("Hooks", [f"<b>{_safe(k)}</b>: {_safe(v)}" for k, v in governance.HOOKS.items()]),
+            ("Guardrails", [f"<b>{_safe(k)}.</b> {_safe(v.split('. ')[0].rstrip('.'))}." for k, v in governance.GUARDRAILS]),
+            (f"Evals: {len(governance.EVALS)} scorers on every run",
+             [_safe(evals) + "."] + [f"&bull; {_safe(t)}" for t in governance.OTHER_EVAL_LAYERS]),
+        ]
+        top, bottom, gap = PAGE_H - 1.6 * inch, 0.8 * inch, 0.25 * inch
+        self._flow(c, 0.6 * inch, top, PAGE_W - 1.2 * inch, 0.32 * inch, [_p(f"<b>{strip}</b>", "body")])
+        cw, ch = (PAGE_W - 1.2 * inch - gap) / 2, (top - 0.1 * inch - bottom - gap) / 2
+        for i, (title, items) in enumerate(panels):
+            x = 0.6 * inch + (i % 2) * (cw + gap)
+            y = bottom + (1 - i // 2) * (ch + gap)
+            c.setFillColor(colors.HexColor("#eef3f8"))
+            c.roundRect(x, y, cw, ch, 6, fill=1, stroke=0)
+            pad = 0.12 * inch
+            self._flow(c, x + pad, y + pad, cw - 2 * pad, ch - 2 * pad,
+                       [_p(_safe(title), "h2"), *[_p(t, "log") for t in items]])
 
     def _draw_pitch_compliance(self, c):
         """Compliance bullets, with the fictional-standards footnote on the same page."""

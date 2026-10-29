@@ -420,7 +420,18 @@ def team_quality(run, threshold=1.0):
 
 PITCH_MAIN_TITLES = ("The Top Strategy:", "Performance:", "The Team:", "Investment Process",
                      "Investment Process: Portfolio Manager and Analyst Dialogue", "Constructive Feedback",
-                     "Harsh Feedback", "Compliance", "Disclosures")
+                     "Harsh Feedback", "Token Counts and Costs per Tool", "Evals, Hooks, Harness and Guardrails",
+                     "Compliance", "Disclosures")
+
+
+def _cost_page_ok(run, main):
+    """The pitchbook's cost page shows the manifest's total cost and its most expensive tool."""
+    m = run.json("manifest.json") or {}
+    page = next((p for p in main if p.lstrip().startswith("Token Counts and Costs per Tool")), "")
+    if not m.get("cost_by_tool") or not page:
+        return False
+    top_tool, top_row = next(iter(m["cost_by_tool"].items()))
+    return f"${m['cost_usd']:.3f}" in page and top_tool in page and f"${top_row['cost_usd']:.3f}" in page
 
 
 def pitchbook_structure(run, threshold=1.0):
@@ -445,7 +456,8 @@ def pitchbook_structure(run, threshold=1.0):
     checks = {
         "title": PdfReader(str(pdf)).metadata.title == "Agentic Capital Management Pitchbook",
         "main_pages_in_order": None not in order and order == sorted(order),
-        "main_section_is_short": 0 < len(main) <= 12,
+        "main_section_is_short": 0 < len(main) <= 13,
+        "cost_page_matches_manifest": _cost_page_ok(run, main),
         "zero_years_experience": any("investing experience: 0 years" in p for p in main),
         "compliance_fakes_labelled": any("FAKEGIPS" in p and "FAKECFA" in p and "fictional standards" in p for p in main),
         "disclosures_all_fake_agentic_no_risk_mgmt": all(s in last_main for s in (
